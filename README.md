@@ -1,3 +1,8 @@
-# ZnO-ML-properties
-A Hybrid Machine Learning–Physics Framework for Predicting Electronic Properties of Mg-Doped Bulk and Two-Dimensional ZnO in Data-Sparse Regimes.
-The first code where five different Machine learning  models were compared in terms of coefficient of determination(R2), root mean square error(RMSE), mean absolute error(MAE) for the further task. Accordingly in the second code, the properties of dopant induced ZnO and 2D ZnO were predicted using the best performed model from first code(For verifying and ensuring that we are relying on the right ML model, the best performed model from first code was again compared with RandomForest model).Therefore in the third code, for handling the data unavailability at data-sparse regimes, bowing relation is implemented on the code. Also, for ensuring the prediction reliability uncertaiity quantification was estimated using quantile gradient boosting.
+First Code:
+This code evaluates and compares five different machine learning models using a ZnO materials dataset. Model performance is assessed based on the coefficient of determination (R²), root mean square error (RMSE), and mean absolute error (MAE) to identify the best-performing model.
+
+Second Code:
+Using the selected best-performing model, this code predicts the properties of dopant-induced ZnO and 2D ZnO materials, enabling the exploration of modified and low-dimensional ZnO systems.
+
+Third Code:
+To address data scarcity in underrepresented regimes, this code incorporates a bowing relation into the prediction framework. Additionally, prediction reliability is enhanced through uncertainty quantification using quantile gradient boosting.
