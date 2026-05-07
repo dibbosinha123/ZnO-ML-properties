@@ -130,7 +130,7 @@ print("\n" + "="*90)
 print("MATERIALS PROJECT MULTI-DOPANT DISTRIBUTION ANALYSIS (0-50% FOCUS)")
 print("="*90)
 
-# Your requested five specific ranges for focused 0-50% analysis
+
 requested_ranges = [
     (0, 10, "0-10%"),
     (10, 20, "10-20%"),
