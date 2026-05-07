@@ -78,7 +78,7 @@ print(f"Total materials fetched: {len(df)}")
 # === 3. Enhanced Multi-Dopant Data Preprocessing ===
 print("\nProcessing and classifying multi-dopant materials...")
 
-# Clean data (KEEP quality filters)
+# Clean data (quality filters)
 df = df.dropna(subset=["band_gap"])
 df = df[df["band_gap"] > 0.1]
 df = df[df["band_gap"] < 8.0]
