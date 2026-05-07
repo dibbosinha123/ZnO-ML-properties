@@ -321,7 +321,7 @@ print("="*80)
 print(results_df.to_string(float_format=lambda x: '{:.4f}'.format(x)))
 
 # ============================================================
-# 📊 Combined Performance Visualization
+#  Combined Performance Visualization
 # ============================================================
 
 fig, ax1 = plt.subplots(figsize=(14, 7))
