@@ -39,7 +39,18 @@ with MPRester(API_KEY) as mpr:
     )
 
 df = pd.DataFrame([r.dict() for r in mp_res])
-print(f" fetched             : {len(df)} rows")
+print(f"✅ fetched             : {len(df)} rows")
+print("\nChecking duplicate material IDs...")
+
+before = len(df)
+
+df = df.drop_duplicates(subset=["material_id"])
+
+after = len(df)
+
+print(f"Before duplicate removal: {before}")
+print(f"After duplicate removal : {after}")
+print(f"Duplicates removed      : {before-after}")
 
 
 # Modified filtering to include normal ZnO bandgap range
@@ -66,7 +77,7 @@ print(df.groupby("structure_type")["band_gap"].describe())
 # Enhanced Bandgap Analysis and Visualization
 # ============================================================
 print("\n" + "="*50)
-print(" BANDGAP ANALYSIS: 2D ZnO vs Normal ZnO")
+print("🔍 BANDGAP ANALYSIS: 2D ZnO vs Normal ZnO")
 print("="*50)
 
 comparison_stats = df.groupby("structure_type")["band_gap"].agg([
@@ -78,10 +89,10 @@ comparison_stats = df.groupby("structure_type")["band_gap"].agg([
 ]).round(3)
 
 # Print formatted statistics
-print("\n Statistical Summary:")
+print("\n📊 Statistical Summary:")
 print("-"*50)
 for idx, row in comparison_stats.iterrows():
-    print(f"\n {idx}:")
+    print(f"\n🔸 {idx}:")
     print(f"   ├── Average Bandgap: {row['Average Bandgap (eV)']:.3f} eV")
     print(f"   ├── Range: {row['Min Bandgap (eV)']:.3f} - {row['Max Bandgap (eV)']:.3f} eV")
     print(f"   ├── Standard Deviation: {row['Standard Deviation']:.3f} eV")
@@ -147,7 +158,6 @@ df["volume_squared"] = df["volume"] ** 2
 df["energy_squared"] = df["formation_energy_per_atom"] ** 2
 df["density_volume"] = df["density"] * df["volume"]
 df["energy_volume"] = df["formation_energy_per_atom"] * df["volume"]
-df["band_gap_density_ratio"] = df["band_gap"] / df["density"]
 df["formation_energy_ratio"] = df["formation_energy_per_atom"] / df["volume"]
 
 # One-hot encode dopant element
@@ -165,12 +175,23 @@ df = pd.concat([df.reset_index(drop=True), dopant_ohe], axis=1)
 
 # Select features
 base_feats = [
-    "density", "volume", "nsites", "formation_energy_per_atom",
-    "cbm", "vbm", "avg_atomic_volume", "dopant_count",
-    "energy_density", "band_width", "volume_per_site",
-    "density_squared", "volume_squared", "energy_squared",
-    "density_volume", "energy_volume", "band_gap_density_ratio",
-    "formation_energy_ratio"
+"density",
+"volume",
+"nsites",
+"formation_energy_per_atom",
+"cbm",
+"vbm",
+"avg_atomic_volume",
+"dopant_count",
+"energy_density",
+"band_width",
+"volume_per_site",
+"density_squared",
+"volume_squared",
+"energy_squared",
+"density_volume",
+"energy_volume",
+"formation_energy_ratio"
 ]
 final_feats = base_feats + list(dopant_ohe.columns)
 X, y = df[final_feats], df["band_gap"]
@@ -180,6 +201,17 @@ X, y = df[final_feats], df["band_gap"]
 # ============================================================
 X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
 X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+print("\nDATASET SPLIT SUMMARY")
+print("="*40)
+
+print(f"Total samples      : {len(X)}")
+print(f"Training samples   : {len(X_train)}")
+print(f"Validation samples : {len(X_val)}")
+print(f"Test samples       : {len(X_test)}")
+
+print(f"Training %   : {100*len(X_train)/len(X):.1f}%")
+print(f"Validation % : {100*len(X_val)/len(X):.1f}%")
+print(f"Test %       : {100*len(X_test)/len(X):.1f}%")
 
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
@@ -274,14 +306,34 @@ def plot_learning_curve(estimator, title, X, y, ylim=None, cv=5,
     plt.legend(loc="best")
     return plt
 
+from sklearn.model_selection import KFold
+
+cv = KFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
 rows = []
 predictions = {}
+
 
 for name, model in models.items():
     print(f"\nTraining {name} ...")
 
     # Train model
     model.fit(X_train_scaled, y_train)
+    cv_scores = cross_val_score(
+    model,
+    X_train_scaled,
+    y_train,
+    cv=cv,
+    scoring="r2"
+)
+
+    cv_mean = cv_scores.mean()
+    cv_std = cv_scores.std()
+
+    print(f"5-Fold CV R²: {cv_mean:.4f} ± {cv_std:.4f}")
 
     # Make predictions
     y_val_pred = model.predict(X_val_scaled)
@@ -298,6 +350,8 @@ for name, model in models.items():
     # Store results
     rows.append({
         "Model": name,
+        "CV Mean R²": cv_mean,
+        "CV Std": cv_std,
         "Validation R²": val_r2,
         "Test R²": test_r2,
         "Validation MAE": val_mae,
@@ -321,7 +375,7 @@ print("="*80)
 print(results_df.to_string(float_format=lambda x: '{:.4f}'.format(x)))
 
 # ============================================================
-#  Combined Performance Visualization
+# 📊 Combined Performance Visualization
 # ============================================================
 
 fig, ax1 = plt.subplots(figsize=(14, 7))
@@ -356,7 +410,7 @@ plt.tight_layout()
 plt.show()
 
 # Print results with overfitting analysis
-print("\n Model Performance and Overfitting Analysis:")
+print("\n🔍 Model Performance and Overfitting Analysis:")
 print("="*80)
 print(results_df.to_string(float_format=lambda x: '{:.4f}'.format(x)))
 print("\nOverfitting Analysis:")
@@ -390,7 +444,23 @@ plt.show()
 best_model_name = results_df.iloc[0]["Model"]
 best_model = models[best_model_name]
 joblib.dump(best_model, f"best_model_ZnO.pkl")
-print(f"\n Saved best model: {best_model_name}")
+print("\nGenerating SHAP analysis...")
+
+explainer = shap.Explainer(
+    best_model,
+    X_train_scaled
+)
+
+shap_values = explainer(
+    X_test_scaled
+)
+
+shap.summary_plot(
+    shap_values,
+    X_test,
+    feature_names=X.columns
+)
+print(f"\n✅ Saved best model: {best_model_name}")
 
 
 # ============================================================
@@ -438,4 +508,4 @@ plt.show()
 
 # Save predictions
 predictions_df.to_csv("predicted_band_gaps_ZnO.csv", index=False)
-print("\n Predictions saved to predicted_band_gaps_ZnO.csv")
+print("\n✅ Predictions saved to predicted_band_gaps_ZnO.csv")
