@@ -20,7 +20,7 @@ from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import shap, joblib, warnings, os, json
 warnings.filterwarnings("ignore")
 
-# Set default plot style
+
 plt.style.use('default')
 sns.set_theme(style="whitegrid")
 
@@ -39,7 +39,7 @@ with MPRester(API_KEY) as mpr:
     )
 
 df = pd.DataFrame([r.dict() for r in mp_res])
-print(f"✅ fetched             : {len(df)} rows")
+print(f" fetched             : {len(df)} rows")
 print("\nChecking duplicate material IDs...")
 
 before = len(df)
@@ -53,7 +53,7 @@ print(f"After duplicate removal : {after}")
 print(f"Duplicates removed      : {before-after}")
 
 
-# Modified filtering to include normal ZnO bandgap range
+# Modified filter to include normal ZnO bandgap range
 df["nelements"] = df["elements"].apply(len)
 df = df[df["nelements"].isin([2, 3])]
 df = df.dropna(subset=["band_gap"])
@@ -89,7 +89,7 @@ comparison_stats = df.groupby("structure_type")["band_gap"].agg([
 ]).round(3)
 
 # Print formatted statistics
-print("\n📊 Statistical Summary:")
+print("\n Statistical Summary:")
 print("-"*50)
 for idx, row in comparison_stats.iterrows():
     print(f"\n🔸 {idx}:")
@@ -410,7 +410,7 @@ plt.tight_layout()
 plt.show()
 
 # Print results with overfitting analysis
-print("\n🔍 Model Performance and Overfitting Analysis:")
+print("\n Model Performance and Overfitting Analysis:")
 print("="*80)
 print(results_df.to_string(float_format=lambda x: '{:.4f}'.format(x)))
 print("\nOverfitting Analysis:")
@@ -460,7 +460,7 @@ shap.summary_plot(
     X_test,
     feature_names=X.columns
 )
-print(f"\n✅ Saved best model: {best_model_name}")
+print(f"\n Saved best model: {best_model_name}")
 
 
 # ============================================================
@@ -508,4 +508,5 @@ plt.show()
 
 # Save predictions
 predictions_df.to_csv("predicted_band_gaps_ZnO.csv", index=False)
-print("\n✅ Predictions saved to predicted_band_gaps_ZnO.csv")
+print("\n Predictions saved to predicted_band_gaps_ZnO.csv")
+
