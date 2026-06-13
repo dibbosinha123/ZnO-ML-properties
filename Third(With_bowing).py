@@ -358,43 +358,136 @@ feature_columns = base_features + dopant_features
 print(f"Created {len(feature_columns)} features for multi-dopant electronic properties analysis")
 
 # === 5. MULTI-DOPANT ELECTRONIC PROPERTIES CALCULATION FUNCTIONS ===
-def calculate_n_type_conductivity_ZnO(
-    bandgap,
-    doping_percent,
-    mobility_cm2_Vs,
+import numpy as np
+
+def calculate_density_of_states(
+    effective_mass,
     structure_type,
     temperature=300
 ):
     """
-    n-type conductivity for ZnO including intrinsic background carriers
-    Returns conductivity in S/m
+    Calculate Nc and Nv from effective mass.
     """
 
+    #m_e = effective_mass
+    m_e = 0.24
+
+    # ZnO hole effective mass
+    m_h = 0.59
+
+    #if structure_type == "2D ZnO":
+        #m_e *= 0.8
+        #m_h *= 0.8
+
+    Nc = (
+        2.51e19
+        * (m_e ** 1.5)
+        * (temperature / 300.0) ** 1.5
+    )
+
+    Nv = (
+        2.51e19
+        * (m_h ** 1.5)
+        * (temperature / 300.0) ** 1.5
+    )
+
+    return Nc, Nv
+
+def calculate_n_type_conductivity_ZnO(
+    bandgap,
+    doping_percent,
+    mobility_cm2_Vs,
+    effective_mass,
+    structure_type,
+    temperature=300
+):
+    """
+    Electrical conductivity model for Zn(1-x)Mg(x)O.
+
+    Parameters
+    ----------
+    bandgap : float
+        Predicted band gap (eV) of the Mg-doped ZnO sample.
+
+    doping_percent : float
+        Mg concentration (mol%).
+
+    mobility_cm2_Vs : float
+        Electron mobility (cm²/V·s).
+
+    structure_type : str
+        "Bulk ZnO" or "2D ZnO".
+
+    temperature : float
+        Temperature (K).
+
+    Returns
+    -------
+    sigma : float
+        Electrical conductivity (S/m).
+    """
+
+    # --------------------------------------------------
+    # Physical constants
+    # --------------------------------------------------
     q = 1.602e-19      # C
     k_B = 8.617e-5     # eV/K
 
-    # ---------- Background (intrinsic) electron concentration ----------
+    # --------------------------------------------------
+    # Density of states from effective mass
+    # --------------------------------------------------
+    Nc, Nv = calculate_density_of_states(
+        effective_mass,
+        structure_type,
+        temperature
+    )
+
+    # --------------------------------------------------
+    # Native defect concentration
+    # --------------------------------------------------
     if structure_type == "2D ZnO":
-        n_intrinsic = 5e13   # cm^-3 (lower for 2D)
-        N0 = 5e19
+        n_defect = 1.0e13
     else:
-        n_intrinsic = 1e15   # cm^-3 (bulk ZnO)
-        N0 = 1e20
+        n_defect = 1.0e15
 
-    # ---------- Donor concentration from doping % ----------
-    n_donor = (doping_percent / 100) * N0
+    # --------------------------------------------------
+    # Bandgap
+    # --------------------------------------------------
+    # Use ML-predicted bandgap directly
+    Eg_eff = bandgap
 
-    # ---------- Donor activation energy ----------
-    E_d = min(0.05, bandgap / 20)
+    # --------------------------------------------------
+    # Intrinsic carrier concentration
+    # ni = sqrt(Nc Nv) exp(-Eg / 2kT)
+    # --------------------------------------------------
+    ni_intrinsic = np.sqrt(Nc * Nv) * np.exp(
+        -Eg_eff / (2.0 * k_B * temperature)
+    )
 
-    # ---------- Thermally activated donors ----------
-    n_activated = n_donor * np.exp(-E_d / (k_B * temperature))
+    # --------------------------------------------------
+    # Total electron concentration
+    # Native defects dominate conductivity
+    # --------------------------------------------------
+    n_total = ni_intrinsic + n_defect
 
-    # ---------- Total electron concentration ----------
-    n_total = n_intrinsic + n_activated
+    # --------------------------------------------------
+    # Mg alloy scattering correction
+    # --------------------------------------------------
+    x = doping_percent / 100.0
 
-    # ---------- Conductivity ----------
-    sigma = q * n_total * mobility_cm2_Vs * 100  # S/m
+    alloy_factor = max(0.5, 1.0 - 0.5 * x)
+
+    mu_eff = mobility_cm2_Vs * alloy_factor
+
+    # --------------------------------------------------
+    # Conductivity
+    # σ = q n μ
+    # Convert mobility:
+    # cm²/Vs → m²/Vs  (×10^-4)
+    # cm^-3 → m^-3    (×10^6)
+    # Overall factor = 100
+    # --------------------------------------------------
+    sigma = q * n_total * mu_eff * 100
 
     return sigma
 
@@ -402,7 +495,7 @@ def calculate_n_type_conductivity_ZnO(
 
 def calculate_effective_mass_multi_dopant(bandgap, dopant_type):
     """Calculate effective mass (m*/m0) for different dopants"""
-    base_mass = 0.3 + 0.1 * (bandgap - 2.0)
+    base_mass = 0.24 + 0.08 * (bandgap - 2.0)
 
     # Dopant-specific mass corrections
     mass_corrections = {
@@ -421,7 +514,7 @@ def calculate_effective_mass_multi_dopant(bandgap, dopant_type):
 
 def calculate_electron_mobility_multi_dopant(doping_percent, bandgap, dopant_type):
     """Calculate electron mobility (cm2/V·s) for different dopants"""
-    base_mobility = 15.0  # cm2/V·s
+    base_mobility = 200  # cm2/V·s
 
     # Dopant-specific mobility factors
     mobility_factors = {
@@ -547,7 +640,7 @@ def delta_learning_correction(ml_bg, physics_bg, doping_percent):
     elif doping_percent <= 25:
         w = 0.5
     else:
-        w = 0.3   # more ML at high doping
+        w = 0.3   
 
     final_bg = w*physics_bg + (1 - w)*ml_bg
 
@@ -874,7 +967,7 @@ for dopant in dopants_to_analyze:
                 physics_bg,
                 doping
             )
-            # ---- APPLY SAME CORRECTION TO CI (CRITICAL FIX) ----
+            # ---- APPLY SAME CORRECTION TO CI  ----
             bg_lower_corrected = min(delta_learning_correction(
                 bg_lower,
                 physics_bg,
@@ -912,8 +1005,9 @@ for dopant in dopants_to_analyze:
 
             # Calculate electronic properties
             mobility = calculate_electron_mobility_multi_dopant(doping, predicted_bandgap, dopant)
-            conductivity = calculate_n_type_conductivity_ZnO(predicted_bandgap,doping,mobility,struct_name)
             effective_mass = calculate_effective_mass_multi_dopant(predicted_bandgap, dopant)
+            conductivity = calculate_n_type_conductivity_ZnO(predicted_bandgap,doping,mobility,effective_mass,struct_name)
+
             absorption = calculate_absorption_coefficient_multi_dopant(predicted_bandgap, doping, dopant)
 
             prediction_results.append({
