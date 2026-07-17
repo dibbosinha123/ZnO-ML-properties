@@ -191,15 +191,15 @@ def create_physical_2D_features(df):
     df["volume_expansion"] = df["volume"] / df["nsites"]  # Same as volume_per_site
 
     # Electronic structure indicators
-    df["electronic_anisotropy"] = df["band_gap"] / df["density"]
-    df["bandgap_density_product"] = df["band_gap"] * df["density"]
+    df["electronic_anisotropy"] = np.abs(df["cbm"] - df["vbm"])
+    df["bandgap_density_product"] = np.abs(df["cbm"] - df["vbm"]) * df["density"]
 
     # Coordination environment
     df["coordination_factor"] = df["nsites"] / (df["volume"] ** (1/3))
     df["dimensional_factor"] = df["volume"] / (df["nsites"] ** (2/3))
 
     # Quantum confinement indicators
-    df["confinement_parameter"] = df["band_gap"] * df["volume_per_site"]
+    df["confinement_parameter"] = 1.0 / (df["volume_per_site"] + 1e-6)
     df["thickness_indicator"] = df["volume"] / (df["nsites"] * df["density"])
 
     return df
