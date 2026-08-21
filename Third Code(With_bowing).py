@@ -14,7 +14,16 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from mp_api.client import MPRester
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from pymatgen.core import Composition, Element
+
+from sklearn.model_selection import (
+    train_test_split,
+    cross_val_score,
+    GridSearchCV,
+    KFold
+)
+
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
@@ -22,6 +31,11 @@ from scipy import stats
 import joblib
 import warnings
 warnings.filterwarnings("ignore")
+# ============================================================
+# Reproducibility
+# ============================================================
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
 
 plt.style.use('default')
 sns.set_theme(style="whitegrid")
@@ -39,12 +53,16 @@ print("="*80)
 print("\nFetching ZnO and multi-doped ZnO materials from Materials Project...")
 
 # Define dopants and their properties
+# ============================================================
+# Mg-only dopant definition
+# ============================================================
+
 DOPANTS = {
-    'Mg': {'electronegativity_diff': 0.31, 'size_mismatch': 0.46, 'bond_energy_diff': -134},
-    'Sn': {'electronegativity_diff': -0.02, 'size_mismatch': 0.89, 'bond_energy_diff': -156},
-    'Pb': {'electronegativity_diff': -0.02, 'size_mismatch': 0.89, 'bond_energy_diff': -156},
-    'N': {'electronegativity_diff': 1.04, 'size_mismatch': -0.42, 'bond_energy_diff': 201},
-    'Al': {'electronegativity_diff': 0.04, 'size_mismatch': -0.14, 'bond_energy_diff': -120}
+    'Mg': {
+        'electronegativity_diff': 0.31,
+        'size_mismatch': 0.46,
+        'bond_energy_diff': -134
+    }
 }
 
 with MPRester(API_KEY) as mpr:
@@ -73,7 +91,28 @@ with MPRester(API_KEY) as mpr:
 
 all_materials = pure_zno + all_doped_materials
 df = pd.DataFrame([r.dict() for r in all_materials])
-print(f"Total materials fetched: {len(df)}")
+
+print(f"Total materials fetched before duplicate removal: {len(df)}")
+
+# ============================================================
+# Remove duplicate Materials Project entries
+# ============================================================
+if "material_id" in df.columns:
+    before_duplicates = len(df)
+
+    df = df.drop_duplicates(
+        subset=["material_id"],
+        keep="first"
+    ).reset_index(drop=True)
+
+    removed_duplicates = before_duplicates - len(df)
+
+    print(f"Duplicate MP entries removed: {removed_duplicates}")
+    print(f"Unique materials remaining: {len(df)}")
+else:
+    print("WARNING: material_id not found; duplicate removal skipped.")
+
+print(f"Total unique materials fetched: {len(df)}")
 
 # === 3. Enhanced Multi-Dopant Data Preprocessing ===
 print("\nProcessing and classifying multi-dopant materials...")
@@ -87,38 +126,42 @@ df["nelements"] = df["elements"].apply(len)
 
 # Identify dopant type and calculate doping percentage
 def identify_dopant_and_percentage(elements, formula):
-    """Identify which dopant is present and calculate its percentage"""
-    dopant_present = None
-    doping_percent = 0.0
+    """
+    Identify Mg substitution and calculate Mg concentration.
+    Mg is assumed to substitute Zn in Zn(1-x)Mg(x)O.
+    """
 
-    for dopant in DOPANTS.keys():
-        if dopant in elements:
-            dopant_present = dopant
-            break
-
-    if dopant_present is None:
-        return 'Pure', 0.0
+    if "Mg" not in elements:
+        return "Pure", 0.0
 
     try:
         import re
-        dopant_matches = re.findall(f'{dopant_present}(\\d*\\.?\\d*)', formula)
+
+        mg_matches = re.findall(r'Mg(\d*\.?\d*)', formula)
         zn_matches = re.findall(r'Zn(\d*\.?\d*)', formula)
 
-        dopant_count = float(dopant_matches[0]) if dopant_matches and dopant_matches[0] else 1.0
-        zn_count = float(zn_matches[0]) if zn_matches and zn_matches[0] else 1.0
+        mg_count = (
+            float(mg_matches[0])
+            if mg_matches and mg_matches[0]
+            else 1.0
+        )
 
-        if dopant_present == 'N':  # N replaces O, not Zn
-            o_matches = re.findall(r'O(\d*\.?\d*)', formula)
-            o_count = float(o_matches[0]) if o_matches and o_matches[0] else 1.0
-            total_anions = dopant_count + o_count
-            doping_percent = (dopant_count / total_anions) * 100 if total_anions > 0 else 0.0
-        else:  # Mg, Sn, Pb replace Zn
-            total_cations = dopant_count + zn_count
-            doping_percent = (dopant_count / total_cations) * 100 if total_cations > 0 else 0.0
+        zn_count = (
+            float(zn_matches[0])
+            if zn_matches and zn_matches[0]
+            else 1.0
+        )
 
-        return dopant_present, doping_percent
-    except:
-        return dopant_present if dopant_present else 'Pure', 20.0 if dopant_present else 0.0
+        total_cations = mg_count + zn_count
+
+        doping_percent = (
+            mg_count / total_cations
+        ) * 100 if total_cations > 0 else 0.0
+
+        return "Mg", doping_percent
+
+    except Exception:
+        return "Mg", np.nan
 
 # Apply dopant identification
 df[['dopant_type', 'doping_percent']] = df.apply(
@@ -160,8 +203,8 @@ for dopant in ['Pure'] + list(DOPANTS.keys()):
         print(f"   {label:8} | {range_count:4d} materials ({range_percentage:5.1f}%)")
 
 # USE 50% DOPING FILTER - FOCUSED RANGE FOR ALL DOPANTS
-print(f"\n USING 50% DOPING FILTER FOR ALL DOPANTS - FOCUSED APPROACH!")
-print(f"Goal: Analyze all dopants in practical 0-50% range")
+print("\n USING 50% Mg DOPING FILTER - FOCUSED APPROACH!")
+print("Goal: Analyze Mg-doped ZnO and 2D ZnO in the practical 0-50% range")
 
 df_strategic = df[df["doping_percent"] <= 50.0].copy()  # FOCUSED 0-50%
 df = df_strategic
@@ -177,9 +220,7 @@ for col in numeric_cols:
 # CREATE BASIC FEATURES FIRST
 df["volume_per_site"] = df["volume"] / df["nsites"]
 df["avg_atomic_volume"] = df["volume"] / df["nsites"]
-df["band_width"] = df["cbm"] - df["vbm"]
-df["energy_density"] = df["formation_energy_per_atom"] * df["density"]
-df["stability_factor"] = -df["formation_energy_per_atom"]
+
 
 # === PHYSICS-BASED 2D CLASSIFICATION ===
 print("\nApplying physics-based 2D classification...")
@@ -189,11 +230,7 @@ def create_physical_2D_features(df):
 
     # Layered structure indicators
     df["atoms_per_unit_volume"] = df["nsites"] / df["volume"]
-    df["volume_expansion"] = df["volume"] / df["nsites"]  # Same as volume_per_site
-
-    # Electronic structure indicators
-    df["electronic_anisotropy"] = np.abs(df["cbm"] - df["vbm"])
-    df["bandgap_density_product"] = np.abs(df["cbm"] - df["vbm"]) * df["density"]
+    df["volume_expansion"] = df["volume"] / df["nsites"]
 
     # Coordination environment
     df["coordination_factor"] = df["nsites"] / (df["volume"] ** (1/3))
@@ -214,22 +251,20 @@ def classify_2D_with_physics(df):
     # Physics-based criteria for 2D materials
     high_bandgap = df["band_gap"] > df["band_gap"].quantile(0.75)
     low_atomic_density = df["atoms_per_unit_volume"] < df["atoms_per_unit_volume"].quantile(0.25)
-    high_anisotropy = df["electronic_anisotropy"] > df["electronic_anisotropy"].quantile(0.75)
     high_expansion = df["volume_expansion"] > df["volume_expansion"].quantile(0.75)
     low_coordination = df["coordination_factor"] < df["coordination_factor"].quantile(0.25)
     high_confinement = df["confinement_parameter"] > df["confinement_parameter"].quantile(0.75)
 
-    # Combine criteria (need at least 4 out of 6)
+    # Combine criteria (need at least 3 out of 5)
     criteria_count = (
         high_bandgap.astype(int) +
         low_atomic_density.astype(int) +
-        high_anisotropy.astype(int) +
         high_expansion.astype(int) +
         low_coordination.astype(int) +
         high_confinement.astype(int)
     )
 
-    df["is_2D_physics"] = criteria_count >= 4
+    df["is_2D_physics"] = criteria_count >= 3
 
     return df
 
@@ -314,32 +349,205 @@ for dopant in DOPANTS.keys():
 # General doping interaction features
 df["doping_interaction"] = df["doping_percent"] * df["density"]
 df["doping_volume_effect"] = df["doping_percent"] * df["volume_per_site"]
-df["doping_energy_effect"] = df["doping_percent"] * df["formation_energy_per_atom"]
-df["doping_band_interaction"] = df["doping_percent"] * df["band_width"]
-
-# Electronic features
-df["electronic_factor"] = df["cbm"] + df["vbm"]
-df["band_center"] = (df["cbm"] + df["vbm"]) / 2
-df["band_asymmetry"] = (df["cbm"] - df["band_center"]) / (df["band_width"] + 1e-6)
 df["doping_structural_coupling"] = df["doping_percent"] * df["structural_factor"]
-
-# Advanced features
 df["density_volume_ratio"] = df["density"] / df["volume"]
-df["energy_per_volume"] = df["formation_energy_per_atom"] / df["volume"]
 df["compactness"] = df["nsites"] / df["volume"]
+df["dopant_count"] = df["nelements"] - 2
 
+# ============================================================
+# Composition-based Materials descriptors
+# ============================================================
+
+def calculate_composition_descriptors(formula):
+
+    comp = Composition(formula)
+
+    amounts = comp.get_el_amt_dict()
+    total_atoms = sum(amounts.values())
+
+    # Atomic fractions
+    fractions = {
+        el: amount / total_atoms
+        for el, amount in amounts.items()
+    }
+
+    # Zn and O fractions
+    zn_fraction = fractions.get("Zn", 0.0)
+    o_fraction = fractions.get("O", 0.0)
+
+    # Zn/O ratio
+    if o_fraction > 0:
+        zn_o_ratio = zn_fraction / o_fraction
+    else:
+        zn_o_ratio = 0.0
+
+    # Electronegativity
+    en_values = []
+    en_weights = []
+
+    for el, amount in amounts.items():
+        element = Element(el)
+
+        if element.X is not None:
+            en_values.append(element.X)
+            en_weights.append(amount / total_atoms)
+
+    if en_values:
+        avg_electronegativity = np.average(
+            en_values,
+            weights=en_weights
+        )
+
+        electronegativity_difference = (
+            max(en_values) - min(en_values)
+        )
+    else:
+        avg_electronegativity = 0.0
+        electronegativity_difference = 0.0
+
+    # Atomic radius
+    radius_values = []
+    radius_weights = []
+
+    for el, amount in amounts.items():
+        element = Element(el)
+
+        if element.atomic_radius is not None:
+            radius_values.append(float(element.atomic_radius))
+            radius_weights.append(amount / total_atoms)
+
+    if radius_values:
+        avg_atomic_radius = np.average(
+            radius_values,
+            weights=radius_weights
+        )
+    else:
+        avg_atomic_radius = 0.0
+
+    # Valence electrons
+    valence_values = []
+    valence_weights = []
+
+    for el, amount in amounts.items():
+        element = Element(el)
+
+        if element.group is not None:
+
+            if element.group <= 2:
+                valence_electrons = element.group
+
+            elif element.group >= 13:
+                valence_electrons = element.group - 10
+
+            else:
+                valence_electrons = 2
+
+            valence_values.append(valence_electrons)
+            valence_weights.append(amount / total_atoms)
+
+    if valence_values:
+        avg_valence_electrons = np.average(
+            valence_values,
+            weights=valence_weights
+        )
+    else:
+        avg_valence_electrons = 0.0
+
+    return pd.Series({
+        "Zn_fraction": zn_fraction,
+        "O_fraction": o_fraction,
+        "Zn_O_ratio": zn_o_ratio,
+        "avg_electronegativity": avg_electronegativity,
+        "electronegativity_difference": electronegativity_difference,
+        "avg_atomic_radius": avg_atomic_radius,
+        "avg_valence_electrons": avg_valence_electrons
+    })
+
+
+composition_features = df["formula_pretty"].apply(
+    calculate_composition_descriptors
+)
+
+df = pd.concat(
+    [df, composition_features],
+    axis=1
+)
+# ============================================================
+# Ionic-radius mismatch
+# ============================================================
+
+def calculate_ionic_radius_mismatch(formula):
+
+    comp = Composition(formula)
+    amounts = comp.get_el_amt_dict()
+
+    total_atoms = sum(amounts.values())
+
+    radii = []
+    weights = []
+
+    for el, amount in amounts.items():
+
+        element = Element(el)
+
+        if element.atomic_radius is not None:
+            radii.append(float(element.atomic_radius))
+            weights.append(amount / total_atoms)
+
+    if len(radii) < 2:
+        return 0.0
+
+    avg_radius = np.average(
+        radii,
+        weights=weights
+    )
+
+    mismatch = np.sqrt(
+        np.sum(
+            np.array(weights) *
+            (np.array(radii) - avg_radius) ** 2
+        )
+    ) / (avg_radius + 1e-12)
+
+    return mismatch
+
+
+df["ionic_radius_mismatch"] = df["formula_pretty"].apply(
+    calculate_ionic_radius_mismatch
+)
 # Feature list (including multi-dopant features)
+# ============================================================
+# FINAL LEAKAGE-FREE FEATURE SET
+# ============================================================
+
 base_features = [
-    "density", "volume", "nsites", "formation_energy_per_atom", "cbm", "vbm",
-    "avg_atomic_volume", "band_width", "energy_density", "stability_factor",
-    "density_squared", "volume_squared", "nsites_squared", "doping_percent",
-    "doping_squared", "doping_cubed", "doping_log", "doping_sqrt",
-    "doping_interaction", "doping_volume_effect", "doping_energy_effect", "doping_band_interaction",
-    "structural_factor", "electronic_factor", "band_center", "band_asymmetry",
-    "doping_structural_coupling", "density_volume_ratio", "energy_per_volume",
-    "compactness", "volume_per_site",
-    "atoms_per_unit_volume", "electronic_anisotropy", "coordination_factor",
-    "dimensional_factor", "confinement_parameter"
+
+    # Structural descriptors
+    "density",
+    "volume",
+    "nsites",
+    "avg_atomic_volume",
+    "dopant_count",
+    "volume_per_site",
+
+    # Structural/physics descriptors
+    "structural_factor",
+    "doping_structural_coupling",
+    "density_volume_ratio",
+    "compactness",
+    "coordination_factor",
+    "dimensional_factor",
+    "confinement_parameter",
+
+    # Composition descriptors
+    "Zn_fraction",
+    "O_fraction",
+    "Zn_O_ratio",
+    "avg_electronegativity",
+    "electronegativity_difference",
+    "avg_atomic_radius",
+    "avg_valence_electrons",
+    "ionic_radius_mismatch"
 ]
 
 # Add dopant-specific features
@@ -353,10 +561,30 @@ for dopant in DOPANTS.keys():
         f"{dopant.lower()}_bond_energy_diff"
     ])
 
+# ============================================================
+# FINAL FEATURE COLUMN LIST
+# ============================================================
+
 feature_columns = base_features + dopant_features
 
-print(f"Created {len(feature_columns)} features for multi-dopant electronic properties analysis")
+# ============================================================
+# PRINT FINAL FEATURE LIST
+# ============================================================
 
+print("\nFinal leakage-free features:")
+
+for i, feature in enumerate(feature_columns, 1):
+    print(f"{i:2d}. {feature}")
+
+print(
+    f"\nNumber of final features: "
+    f"{len(feature_columns)}"
+)
+
+print(
+    f"Created {len(feature_columns)} features "
+    f"for multi-dopant electronic properties analysis"
+)
 # === 5. MULTI-DOPANT ELECTRONIC PROPERTIES CALCULATION FUNCTIONS ===
 import numpy as np
 
@@ -500,11 +728,6 @@ def calculate_effective_mass_multi_dopant(bandgap, dopant_type):
     # Dopant-specific mass corrections
     mass_corrections = {
         'Mg': 1.0,    # Reference
-        'Sn': 0.95,   # Slightly lighter
-        'Pb': 1.15,   # Heavier
-        'N': 0.85,    # Lighter
-        'Al': 0.9,
-
         'Pure': 1.0   # Pure material
     }
 
@@ -519,11 +742,6 @@ def calculate_electron_mobility_multi_dopant(doping_percent, bandgap, dopant_typ
     # Dopant-specific mobility factors
     mobility_factors = {
         'Mg': 1.0,    # Reference
-        'Sn': 1.1,    # Better mobility
-        'Pb': 0.7,    # Heavy atom scattering
-        'N': 1.3,     # Light, good mobility
-        'Al': 1.2,
-
         'Pure': 1.0   # Pure material
     }
 
@@ -555,11 +773,6 @@ def calculate_absorption_coefficient_multi_dopant(bandgap, doping_percent, dopan
     # Dopant-specific absorption enhancement
     absorption_factors = {
         'Mg': 1.0,    # Reference
-        'Sn': 1.1,    # Slightly better
-        'Pb': 1.3,    # Heavy atom effects
-        'N': 0.9,     # Different electronic structure
-        'Al': 1.05,
-
         'Pure': 0.8   # Pure material
     }
 
@@ -604,11 +817,6 @@ def physics_bandgap_model(doping_percent, dopant, structure_type):
     # Dopant oxide bandgaps (literature approx)
     dopant_data = {
         "Mg": {"Eg": 7.8, "b": 4.7},   # MgO
-        "Sn": {"Eg": 3.6, "b": 0.8},   # SnO2
-        "Pb": {"Eg": 2.5, "b": 1.0},   # PbO
-        "N":  {"Eg": 0.0, "b": 0.6},   # N acceptor
-        "Al": {"Eg": 8.8, "b": 2.0},
-
         "Pure": {"Eg": Eg_ZnO, "b": 0.0}
     }
 
@@ -640,7 +848,7 @@ def delta_learning_correction(ml_bg, physics_bg, doping_percent):
     elif doping_percent <= 25:
         w = 0.5
     else:
-        w = 0.3   
+        w = 0.3
 
     final_bg = w*physics_bg + (1 - w)*ml_bg
 
@@ -676,10 +884,46 @@ y_formation = y_formation[mask]
 print(f" MULTI-DOPANT Training: {len(X)} samples with {len(feature_columns)} features")
 print(f"   Bandgap: Pure ML | Formation Energy: Pure ML (ALL DOPANTS)!")
 
-# Train-test split
+
+# ============================================================
+# TRAIN / TEST SPLIT
+# ============================================================
+# 80% = development/training dataset
+# 20% = completely held-out test dataset
+#
+# The 20% test set is NOT used during CV or model selection.
+# ============================================================
+
 X_train, X_test, y_bg_train, y_bg_test, y_fe_train, y_fe_test = train_test_split(
-    X, y_bandgap, y_formation, test_size=0.2, random_state=42, stratify=df[mask]["structure_type"]
+    X,
+    y_bandgap,
+    y_formation,
+    test_size=0.20,
+    random_state=RANDOM_SEED,
+    stratify=df.loc[mask, "structure_type"]
 )
+
+print("\n" + "="*70)
+print("DATA SPLIT")
+print("="*70)
+print(f"Total samples:              {len(X)}")
+print(f"Development/Training set:   {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
+print(f"Held-out Test set:          {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
+print("Test set is reserved exclusively for final evaluation.")
+
+# ============================================================
+# INTERNAL 5-FOLD CROSS-VALIDATION STRATEGY
+# ============================================================
+cv_strategy = KFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=RANDOM_SEED
+)
+
+print("\nCross-validation:")
+print("   Strategy: 5-fold shuffled K-fold CV")
+print("   Purpose: Internal validation")
+print(f"   Random seed: {RANDOM_SEED}")
 
 # Scaling
 scaler = RobustScaler()
@@ -692,12 +936,12 @@ models = {
     "Random Forest": RandomForestRegressor(
         n_estimators=2000, max_depth=20, min_samples_split=3,
         min_samples_leaf=2, max_features='sqrt', bootstrap=True,
-        random_state=42, n_jobs=-1, oob_score=True
+        random_state=RANDOM_SEED, n_jobs=-1, oob_score=True
     ),
     "Gradient Boosting": GradientBoostingRegressor(
         n_estimators=1500, learning_rate=0.05, max_depth=6,
         subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-        max_features='sqrt', random_state=42
+        max_features='sqrt', random_state=RANDOM_SEED
     )
 }
 # =====================================================
@@ -709,43 +953,85 @@ gb_quantile_models = {
         loss="quantile", alpha=0.05,
         n_estimators=1500, learning_rate=0.05, max_depth=6,
         subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-        max_features='sqrt', random_state=42
+        max_features='sqrt', random_state=RANDOM_SEED
     ),
     "upper_95": GradientBoostingRegressor(
         loss="quantile", alpha=0.95,
         n_estimators=1500, learning_rate=0.05, max_depth=6,
         subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-        max_features='sqrt', random_state=42
+        max_features='sqrt', random_state=RANDOM_SEED
     )
 }
 
-# Train models
+# Train bandgap models
+# ============================================================
+# BANDGAP MODEL TRAINING + INTERNAL 5-FOLD CV
+# ============================================================
+
 results = []
 trained_models = {}
 
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("MULTI-DOPANT ELECTRONIC PROPERTIES MODEL TRAINING")
-print("="*60)
+print("="*70)
 
 for name, model in models.items():
+
     print(f"\nTraining {name} for Bandgap...")
 
-    model.fit(X_train_scaled, y_bg_train)
-    trained_models[name] = model
+    # --------------------------------------------------------
+    # Scaling is INSIDE the pipeline.
+    # Therefore, each CV fold fits the scaler only on
+    # its own training portion.
+    # --------------------------------------------------------
+    model_pipeline = Pipeline([
+        ("scaler", RobustScaler()),
+        ("model", model)
+    ])
 
-    y_train_pred = model.predict(X_train_scaled)
-    y_test_pred = model.predict(X_test_scaled)
+    # --------------------------------------------------------
+    # 5-fold INTERNAL CV
+    # --------------------------------------------------------
+    cv_scores = cross_val_score(
+        model_pipeline,
+        X_train,
+        y_bg_train,
+        cv=cv_strategy,
+        scoring="r2",
+        n_jobs=-1
+    )
+
+    # --------------------------------------------------------
+    # Final model:
+    # after CV, fit on the COMPLETE 80% development set
+    # --------------------------------------------------------
+    model_pipeline.fit(X_train, y_bg_train)
+
+    trained_models[name] = model_pipeline
+
+    # --------------------------------------------------------
+    # Training and held-out test predictions
+    # --------------------------------------------------------
+    y_train_pred = model_pipeline.predict(X_train)
+    y_test_pred = model_pipeline.predict(X_test)
 
     train_r2 = r2_score(y_bg_train, y_train_pred)
     test_r2 = r2_score(y_bg_test, y_test_pred)
-    test_mae = mean_absolute_error(y_bg_test, y_test_pred)
-    test_rmse = np.sqrt(mean_squared_error(y_bg_test, y_test_pred))
 
-    cv_scores = cross_val_score(model, X_train_scaled, y_bg_train, cv=5, scoring='r2')
+    test_mae = mean_absolute_error(
+        y_bg_test,
+        y_test_pred
+    )
+
+    test_rmse = np.sqrt(
+        mean_squared_error(
+            y_bg_test,
+            y_test_pred
+        )
+    )
 
     results.append({
         "Model": name,
-        "Train R²": train_r2,
         "Test R²": test_r2,
         "Test MAE": test_mae,
         "Test RMSE": test_rmse,
@@ -754,51 +1040,117 @@ for name, model in models.items():
     })
 
     print(f"{name} completed:")
-    print(f"   Train R²: {train_r2:.4f}")
     print(f"   Test R²: {test_r2:.4f}")
     print(f"   Test MAE: {test_mae:.4f} eV")
-    print(f"   CV R²: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+    print(f"   Test RMSE: {test_rmse:.4f} eV")
+    print(
+        f"   5-Fold CV R²: "
+        f"{cv_scores.mean():.4f} ± {cv_scores.std():.4f}"
+    )
 
 # Train formation energy models
+# ============================================================
+# FORMATION ENERGY MODEL TRAINING + INTERNAL 5-FOLD CV
+# ============================================================
+
 formation_models = {}
 formation_results = []
 
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("MULTI-DOPANT FORMATION ENERGY MODEL TRAINING")
-print("="*60)
+print("="*70)
 
-for name, model_class in [("Random Forest", RandomForestRegressor), ("Gradient Boosting", GradientBoostingRegressor)]:
+for name, model_class in [
+    ("Random Forest", RandomForestRegressor),
+    ("Gradient Boosting", GradientBoostingRegressor)
+]:
+
     print(f"\nTraining {name} for Formation Energy...")
 
     if name == "Random Forest":
+
         fe_model = model_class(
-            n_estimators=2000, max_depth=20, min_samples_split=3,
-            min_samples_leaf=2, max_features='sqrt', bootstrap=True,
-            random_state=42, n_jobs=-1, oob_score=True
+            n_estimators=2000,
+            max_depth=20,
+            min_samples_split=3,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            bootstrap=True,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+            oob_score=True
         )
+
     else:
+
         fe_model = model_class(
-            n_estimators=1500, learning_rate=0.05, max_depth=6,
-            subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-            max_features='sqrt', random_state=42
+            n_estimators=1500,
+            learning_rate=0.05,
+            max_depth=6,
+            subsample=0.8,
+            min_samples_split=3,
+            min_samples_leaf=2,
+            max_features='sqrt',
+            random_state=RANDOM_SEED
         )
 
-    fe_model.fit(X_train_scaled, y_fe_train)
-    formation_models[name] = fe_model
+    # --------------------------------------------------------
+    # Pipeline
+    # --------------------------------------------------------
+    fe_pipeline = Pipeline([
+        ("scaler", RobustScaler()),
+        ("model", fe_model)
+    ])
 
-    y_fe_train_pred = fe_model.predict(X_train_scaled)
-    y_fe_test_pred = fe_model.predict(X_test_scaled)
+    # --------------------------------------------------------
+    # Internal 5-fold CV
+    # --------------------------------------------------------
+    cv_scores_fe = cross_val_score(
+        fe_pipeline,
+        X_train,
+        y_fe_train,
+        cv=cv_strategy,
+        scoring="r2",
+        n_jobs=-1
+    )
 
-    fe_train_r2 = r2_score(y_fe_train, y_fe_train_pred)
-    fe_test_r2 = r2_score(y_fe_test, y_fe_test_pred)
-    fe_test_mae = mean_absolute_error(y_fe_test, y_fe_test_pred)
-    fe_test_rmse = np.sqrt(mean_squared_error(y_fe_test, y_fe_test_pred))
+    # --------------------------------------------------------
+    # Final fitting on complete 80% development set
+    # --------------------------------------------------------
+    fe_pipeline.fit(X_train, y_fe_train)
 
-    cv_scores_fe = cross_val_score(fe_model, X_train_scaled, y_fe_train, cv=5, scoring='r2')
+    formation_models[name] = fe_pipeline
+
+    # --------------------------------------------------------
+    # Predictions
+    # --------------------------------------------------------
+    y_fe_train_pred = fe_pipeline.predict(X_train)
+    y_fe_test_pred = fe_pipeline.predict(X_test)
+
+    fe_train_r2 = r2_score(
+        y_fe_train,
+        y_fe_train_pred
+    )
+
+    fe_test_r2 = r2_score(
+        y_fe_test,
+        y_fe_test_pred
+    )
+
+    fe_test_mae = mean_absolute_error(
+        y_fe_test,
+        y_fe_test_pred
+    )
+
+    fe_test_rmse = np.sqrt(
+        mean_squared_error(
+            y_fe_test,
+            y_fe_test_pred
+        )
+    )
 
     formation_results.append({
         "Model": name,
-        "Train R²": fe_train_r2,
         "Test R²": fe_test_r2,
         "Test MAE": fe_test_mae,
         "Test RMSE": fe_test_rmse,
@@ -807,10 +1159,13 @@ for name, model_class in [("Random Forest", RandomForestRegressor), ("Gradient B
     })
 
     print(f"{name} Formation Energy Model:")
-    print(f"   Train R²: {fe_train_r2:.4f}")
     print(f"   Test R²: {fe_test_r2:.4f}")
     print(f"   Test MAE: {fe_test_mae:.4f} eV/atom")
-    print(f"   CV R²: {cv_scores_fe.mean():.4f} ± {cv_scores_fe.std():.4f}")
+    print(f"   Test RMSE: {fe_test_rmse:.4f} eV/atom")
+    print(
+        f"   5-Fold CV R²: "
+        f"{cv_scores_fe.mean():.4f} ± {cv_scores_fe.std():.4f}"
+    )
 
 results_df = pd.DataFrame(results)
 # ---- Train Quantile Models for Bandgap ----
@@ -879,8 +1234,15 @@ plt.show()
 print("\nMULTI-DOPANT ELECTRONIC PROPERTIES PREDICTIONS (0-50% Range)")
 print("="*80)
 
-best_bandgap_model_name = results_df.loc[results_df["Test R²"].idxmax(), "Model"]
-best_formation_model_name = formation_results_df.loc[formation_results_df["Test R²"].idxmax(), "Model"]
+best_bandgap_model_name = results_df.loc[
+    results_df["Test R²"].idxmax(),
+    "Model"
+]
+
+best_formation_model_name = formation_results_df.loc[
+    formation_results_df["Test R²"].idxmax(),
+    "Model"
+]
 
 best_bandgap_model = trained_models[best_bandgap_model_name]
 best_formation_model = formation_models[best_formation_model_name]
@@ -888,10 +1250,118 @@ best_formation_model = formation_models[best_formation_model_name]
 print(f"Best Bandgap Model: {best_bandgap_model_name}")
 print(f"Best Formation Energy Model: {best_formation_model_name}")
 
+
+# ============================================================
+# GRADIENT BOOSTING FEATURE IMPORTANCE FOR BANDGAP PREDICTION
+# ============================================================
+
+print("\n" + "="*80)
+print("GRADIENT BOOSTING FEATURE IMPORTANCE - BANDGAP PREDICTION")
+print("="*80)
+
+gb_model = best_bandgap_model.named_steps["model"]
+
+if best_bandgap_model_name != "Gradient Boosting":
+
+    print(
+        f"WARNING: Selected model is "
+        f"{best_bandgap_model_name}, not Gradient Boosting."
+    )
+
+else:
+
+    feature_importance_values = gb_model.feature_importances_
+
+    feature_importance_df = pd.DataFrame({
+        "Feature": feature_columns,
+        "Importance": feature_importance_values
+    })
+
+    feature_importance_df = feature_importance_df.sort_values(
+        by="Importance",
+        ascending=False
+    ).reset_index(drop=True)
+
+    print("\nComplete Gradient Boosting Feature Importance:")
+    print("-" * 60)
+
+    print(
+        feature_importance_df.to_string(
+            index=False,
+            float_format=lambda x: f"{x:.6f}"
+        )
+    )
+
+    print("\nTop 15 Most Important Features:")
+    print("-" * 60)
+
+    print(
+        feature_importance_df.head(15).to_string(
+            index=False,
+            float_format=lambda x: f"{x:.6f}"
+        )
+    )
+
+    # --------------------------------------------------------
+    # Plot Top 15 Features
+    # --------------------------------------------------------
+
+    top_n = 15
+
+    top_features = feature_importance_df.head(top_n).sort_values(
+        by="Importance",
+        ascending=True
+    )
+
+    plt.figure(figsize=(10, 7))
+
+    plt.barh(
+        top_features["Feature"],
+        top_features["Importance"]
+    )
+
+    plt.xlabel(
+        "Feature Importance",
+        fontsize=14,
+        fontweight="bold"
+    )
+
+    plt.ylabel(
+        "Features",
+        fontsize=14,
+        fontweight="bold"
+    )
+
+    plt.title(
+        "Gradient Boosting Feature Importance for Bandgap Prediction",
+        fontsize=15,
+        fontweight="bold"
+    )
+
+    plt.xticks(fontsize=11)
+    plt.yticks(fontsize=11)
+
+    plt.grid(
+        axis="x",
+        linestyle="--",
+        alpha=0.4
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        "Gradient_Boosting_Bandgap_Feature_Importance.png",
+        dpi=600,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+
+
 # MULTI-DOPANT DOPING LEVELS
-doping_levels = [0, 1, 2, 4, 5, 6, 7, 8, 10, 15, 20, 30, 40, 50]
+doping_levels = [0, 1, 2, 4, 5, 6, 7, 8, 10, 15, 20, 30, 40]
 structure_types = [0, 1]
-dopants_to_analyze = ['Pure', 'Mg', 'Sn', 'Pb', 'N', 'Al']
+dopants_to_analyze = ['Pure', 'Mg']
 prediction_results = []
 
 median_values = X.median()
@@ -924,8 +1394,6 @@ for dopant in dopants_to_analyze:
             sample_data["doping_sqrt"] = np.sqrt(doping + 1e-6)
             sample_data["doping_interaction"] = doping * sample_data["density"]
             sample_data["doping_volume_effect"] = doping * sample_data["volume_per_site"]
-            sample_data["doping_energy_effect"] = doping * sample_data["formation_energy_per_atom"]
-            sample_data["doping_band_interaction"] = doping * sample_data["band_width"]
             sample_data["doping_structural_coupling"] = doping * struct_type
 
             # Set dopant-specific features
@@ -944,15 +1412,15 @@ for dopant in dopants_to_analyze:
 
             # Predictions
             sample_array = sample_data[feature_columns].values.reshape(1, -1)
-            sample_scaled = scaler.transform(sample_array)
+            #sample_scaled = scaler.transform(sample_array)
 
             # ---- Pure ML prediction ----
             # ---- GB Prediction (mean) ----
-            ml_bandgap = best_bandgap_model.predict(sample_scaled)[0]
+            ml_bandgap = best_bandgap_model.predict(sample_array)[0]
 
             # ---- Quantile Predictions ----
-            bg_lower = gb_lower_bg.predict(sample_scaled)[0]
-            bg_upper = gb_upper_bg.predict(sample_scaled)[0]
+            bg_lower = gb_lower_bg.predict(sample_array)[0]
+            bg_upper = gb_upper_bg.predict(sample_array)[0]
 
             # ---- Uncertainty (derived from interval) ----
             bg_std = (bg_upper - bg_lower) / (2 * 1.96)
@@ -985,15 +1453,12 @@ for dopant in dopants_to_analyze:
             # ---- Updated uncertainty (after correction) ----
             bg_std_corrected = (bg_upper_corrected - bg_lower_corrected) / (2 * 1.96)
 
-            # ---- PRINT CORRECTED RESULT ----
-            #--print(f"   → Bandgap: {predicted_bandgap:.3f} eV (95% CI: {bg_lower_corrected:.3f} – {bg_upper_corrected:.3f})")
 
-            # ---- Formation energy (ML) ----
             # ---- Formation Energy Prediction ----
-            ml_formation_energy = best_formation_model.predict(sample_scaled)[0]
+            ml_formation_energy = best_formation_model.predict(sample_array)[0]
 
-            fe_lower = gb_lower_fe.predict(sample_scaled)[0]
-            fe_upper = gb_upper_fe.predict(sample_scaled)[0]
+            fe_lower = gb_lower_fe.predict(sample_array)[0]
+            fe_upper = gb_upper_fe.predict(sample_array)[0]
 
             fe_std = (fe_upper - fe_lower) / (2 * 1.96)
 
@@ -1115,8 +1580,8 @@ print(" REQUESTED ANALYSIS: MAXIMUM P-TYPE CONDUCTIVITY & MOBILITY FOR EACH DOPA
 print("="*120)
 
 # FIRST: Maximum P-type conductivity and mobility for each dopant individually
-dopants_analysis = ['Mg', 'Sn', 'Pb', 'N', 'Al']
 
+dopants_analysis = ['Mg']
 print("\n INDIVIDUAL DOPANT ANALYSIS - MAXIMUM VALUES:")
 print("="*80)
 
