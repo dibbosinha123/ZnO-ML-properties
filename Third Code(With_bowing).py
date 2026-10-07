@@ -1,8 +1,8 @@
 # ============================================================
 # Multi-Dopant ZnO and 2D ZnO: Electronic Properties Analysis
-# DOPANTS: Mg, Sn, Pb, N - FOCUSED VERSION: 0-50% Doping Range
-# Doping Levels: 1%, 2%, 5%, 10%, 15%, 20%, 30%, 45%, 50%
-# Properties: Bandgap (Pure ML), Formation Energy (ML), Conductivity, Mobility, Effective Mass, Absorption
+# DOPANTS: Mg, Sn, Pb, N - FOCUSED VERSION: 0-30% Prediction Range
+# Doping Levels: 0%, 1%, 2%, 4%, 5%, 6%, 7%, 8%, 10%, 15%, 20%, 30%
+# Properties: Bandgap (ML + fixed bowing blend), Formation Energy (ML), Conductivity, Mobility, Effective Mass, Absorption
 # ============================================================
 
 # === 0. Colab One-time Installs ===
@@ -27,7 +27,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from scipy import stats
 import joblib
 import warnings
 warnings.filterwarnings("ignore")
@@ -40,13 +39,14 @@ np.random.seed(RANDOM_SEED)
 plt.style.use('default')
 sns.set_theme(style="whitegrid")
 
-API_KEY = "4QoUiunPSMRpqOLTwA6qRu8edPSBArZD"
+from getpass import getpass
+API_KEY = getpass("4QoUiunPSMRpqOLTwA6qRu8edPSBArZD").strip()
 
 print("="*80)
-print("MULTI-DOPANT ZnO ELECTRONIC PROPERTIES ANALYSIS - FOCUSED 0-50%")
+print("MULTI-DOPANT ZnO ELECTRONIC PROPERTIES ANALYSIS - FOCUSED 0-30% PREDICTIONS")
 print("DOPANTS: Mg, Sn, Pb, N, Al")
-print("Focus: P-type Conductivity + Electronic Properties")
-print("FOCUSED: Bandgap (Pure ML) + Formation Energy (ML + Physics)")
+print("Focus: N-type Conductivity + Electronic Properties")
+print("FOCUSED: Bandgap (ML + fixed bowing blend) + Formation Energy (ML)")
 print("="*80)
 
 # === 2. Enhanced Multi-Dopant Data Fetching ===
@@ -127,38 +127,21 @@ df["nelements"] = df["elements"].apply(len)
 # Identify dopant type and calculate doping percentage
 def identify_dopant_and_percentage(elements, formula):
     """
-    Identify Mg substitution and calculate Mg concentration.
-    Mg is assumed to substitute Zn in Zn(1-x)Mg(x)O.
+    Mg substitution in Zn(1-x)Mg(x)O:
+    x = N_Mg / (N_Zn + N_Mg), and doping_percent = 100*x.
+    This is the Mg percentage on the Zn/Mg cation sublattice,
+    not the Mg atomic percentage among all atoms including oxygen.
+    ML descriptors and plot axes retain the original percentage convention.
     """
-
-    if "Mg" not in elements:
-        return "Pure", 0.0
-
     try:
-        import re
+        amounts = Composition(formula).get_el_amt_dict()
+        mg_count = amounts.get("Mg", 0.0)
+        zn_count = amounts.get("Zn", 0.0)
 
-        mg_matches = re.findall(r'Mg(\d*\.?\d*)', formula)
-        zn_matches = re.findall(r'Zn(\d*\.?\d*)', formula)
+        if mg_count == 0:
+            return "Pure", 0.0
 
-        mg_count = (
-            float(mg_matches[0])
-            if mg_matches and mg_matches[0]
-            else 1.0
-        )
-
-        zn_count = (
-            float(zn_matches[0])
-            if zn_matches and zn_matches[0]
-            else 1.0
-        )
-
-        total_cations = mg_count + zn_count
-
-        doping_percent = (
-            mg_count / total_cations
-        ) * 100 if total_cations > 0 else 0.0
-
-        return "Mg", doping_percent
+        return "Mg", 100.0 * mg_count / (zn_count + mg_count)
 
     except Exception:
         return "Mg", np.nan
@@ -204,7 +187,7 @@ for dopant in ['Pure'] + list(DOPANTS.keys()):
 
 # USE 50% DOPING FILTER - FOCUSED RANGE FOR ALL DOPANTS
 print("\n USING 50% Mg DOPING FILTER - FOCUSED APPROACH!")
-print("Goal: Analyze Mg-doped ZnO and 2D ZnO in the practical 0-50% range")
+print("Goal: Predict Mg-doped ZnO and 2D ZnO in the practical 0-30% range")
 
 df_strategic = df[df["doping_percent"] <= 50.0].copy()  # FOCUSED 0-50%
 df = df_strategic
@@ -288,7 +271,9 @@ if twod_avg_bg <= bulk_avg_bg:
     df["is_2D_physics"] = df.apply(lambda row: (
         (row["band_gap"] > df["band_gap"].quantile(0.8)) and
         (row["atoms_per_unit_volume"] < df["atoms_per_unit_volume"].quantile(0.2)) and
-        (row["electronic_anisotropy"] > df["electronic_anisotropy"].quantile(0.8))
+        # Compatibility guard: this file does not create this optional column.
+        ("electronic_anisotropy" not in df.columns or
+         row["electronic_anisotropy"] > df["electronic_anisotropy"].quantile(0.8))
     ), axis=1)
 
     df["structure_type"] = df["is_2D_physics"].map({True: "2D ZnO", False: "Bulk ZnO"})
@@ -587,34 +572,70 @@ print(
 )
 # === 5. MULTI-DOPANT ELECTRONIC PROPERTIES CALCULATION FUNCTIONS ===
 import numpy as np
+TRANSPORT_TEMPERATURE_K = 300.0
+Q_C = 1.602e-19
+K_B_EV_K = 8.617e-5
+DOS_PREFACTOR_CM3 = 2.51e19
+M0_KG = 9.1093837e-31
+HBAR_J_S = 1.054571817e-34
+DOS_PREFACTOR_CM2 = (
+    M0_KG * (K_B_EV_K * Q_C) * 300.0 / (np.pi * HBAR_J_S**2) * 1e-4
+)
+BASE_MOBILITY_CM2_VS = 200.0
+BANDGAP_REFERENCE_EV = 2.0
+PRE_ALLOY_MOBILITY_FLOOR_CM2_VS = 0.1
+
+TRANSPORT_PARAMETERS = {
+    "Bulk ZnO": {
+        "Native_Electron_Density_cm3": 1.0e17,
+        "DOS_Electron_Mass_m0": 0.24,
+        "DOS_Hole_Mass_m0": 0.59,
+        "Carrier_Density_Convention": "volumetric (cm^-3)",
+        "DOS_Model": "3D effective DOS",
+        "Transport_Quantity": "Bulk conductivity",
+        "Transport_Unit": "S/m",
+    },
+    "2D ZnO": {
+        "Native_Electron_Density_cm2": 1.0e10,
+        "DOS_Electron_Mass_m0": 0.24,
+        "DOS_Hole_Mass_m0": 0.59,
+        "Carrier_Density_Convention": "sheet (cm^-2)",
+        "DOS_Model": "2D parabolic band; spin degeneracy 2; valley degeneracy 1",
+        "Transport_Quantity": "Sheet conductance",
+        "Transport_Unit": "S",
+    },
+}
+
+
+def mg_cation_fraction(doping_percent):
+    """Convert percentage p (e.g. 5) to cation fraction x=p/100 (e.g. 0.05)."""
+    if not np.isfinite(doping_percent) or not 0.0 <= doping_percent <= 30.0:
+        raise ValueError("Mg concentration must be a finite percentage in [0, 30].")
+    return float(doping_percent) / 100.0
 
 def calculate_density_of_states(
     effective_mass,
     structure_type,
     temperature=300
 ):
-    """
-    Calculate Nc and Nv from effective mass.
-    """
 
-    #m_e = effective_mass
-    m_e = 0.24
+    parameters = TRANSPORT_PARAMETERS[structure_type]
+    m_e = parameters["DOS_Electron_Mass_m0"]
+    m_h = parameters["DOS_Hole_Mass_m0"]
 
-    # ZnO hole effective mass
-    m_h = 0.59
-
-    #if structure_type == "2D ZnO":
-        #m_e *= 0.8
-        #m_h *= 0.8
+    if structure_type == "2D ZnO":
+        Nc = DOS_PREFACTOR_CM2 * m_e * (temperature / 300.0)
+        Nv = DOS_PREFACTOR_CM2 * m_h * (temperature / 300.0)
+        return Nc, Nv
 
     Nc = (
-        2.51e19
+        DOS_PREFACTOR_CM3
         * (m_e ** 1.5)
         * (temperature / 300.0) ** 1.5
     )
 
     Nv = (
-        2.51e19
+        DOS_PREFACTOR_CM3
         * (m_h ** 1.5)
         * (temperature / 300.0) ** 1.5
     )
@@ -627,39 +648,16 @@ def calculate_n_type_conductivity_ZnO(
     mobility_cm2_Vs,
     effective_mass,
     structure_type,
-    temperature=300
+    temperature=300,
+    return_details=False
 ):
-    """
-    Electrical conductivity model for Zn(1-x)Mg(x)O.
 
-    Parameters
-    ----------
-    bandgap : float
-        Predicted band gap (eV) of the Mg-doped ZnO sample.
-
-    doping_percent : float
-        Mg concentration (mol%).
-
-    mobility_cm2_Vs : float
-        Electron mobility (cm²/V·s).
-
-    structure_type : str
-        "Bulk ZnO" or "2D ZnO".
-
-    temperature : float
-        Temperature (K).
-
-    Returns
-    -------
-    sigma : float
-        Electrical conductivity (S/m).
-    """
 
     # --------------------------------------------------
     # Physical constants
     # --------------------------------------------------
-    q = 1.602e-19      # C
-    k_B = 8.617e-5     # eV/K
+    q = Q_C           # C
+    k_B = K_B_EV_K     # eV/K
 
     # --------------------------------------------------
     # Density of states from effective mass
@@ -673,51 +671,36 @@ def calculate_n_type_conductivity_ZnO(
     # --------------------------------------------------
     # Native defect concentration
     # --------------------------------------------------
-    if structure_type == "2D ZnO":
-        n_defect = 1.0e13
-    else:
-        n_defect = 1.0e15
-
-    # --------------------------------------------------
-    # Bandgap
-    # --------------------------------------------------
-    # Use ML-predicted bandgap directly
+    parameters = TRANSPORT_PARAMETERS[structure_type]
+    is_2d = structure_type == "2D ZnO"
+    density_suffix = "cm2" if is_2d else "cm3"
+    n_defect = parameters[f"Native_Electron_Density_{density_suffix}"]
     Eg_eff = bandgap
 
-    # --------------------------------------------------
-    # Intrinsic carrier concentration
-    # ni = sqrt(Nc Nv) exp(-Eg / 2kT)
-    # --------------------------------------------------
+
     ni_intrinsic = np.sqrt(Nc * Nv) * np.exp(
         -Eg_eff / (2.0 * k_B * temperature)
     )
 
-    # --------------------------------------------------
-    # Total electron concentration
-    # Native defects dominate conductivity
-    # --------------------------------------------------
     n_total = ni_intrinsic + n_defect
 
-    # --------------------------------------------------
-    # Mg alloy scattering correction
-    # --------------------------------------------------
-    x = doping_percent / 100.0
+    x = mg_cation_fraction(doping_percent)
+    mu_eff = mobility_cm2_Vs
 
-    alloy_factor = max(0.5, 1.0 - 0.5 * x)
 
-    mu_eff = mobility_cm2_Vs * alloy_factor
+    transport_value = q * n_total * mu_eff * (1.0 if is_2d else 100)
 
-    # --------------------------------------------------
-    # Conductivity
-    # σ = q n μ
-    # Convert mobility:
-    # cm²/Vs → m²/Vs  (×10^-4)
-    # cm^-3 → m^-3    (×10^6)
-    # Overall factor = 100
-    # --------------------------------------------------
-    sigma = q * n_total * mu_eff * 100
-
-    return sigma
+    if return_details:
+        return transport_value, {
+            "Mg_Cation_Fraction_x": x,
+            "Temperature_K": temperature,
+            **parameters,
+            f"Nc_{density_suffix}": Nc,
+            f"Nv_{density_suffix}": Nv,
+            f"Intrinsic_Electron_Density_{density_suffix}": ni_intrinsic,
+            f"Total_Electron_Density_{density_suffix}": n_total,
+        }
+    return transport_value
 
 
 
@@ -736,8 +719,8 @@ def calculate_effective_mass_multi_dopant(bandgap, dopant_type):
     return max(0.1, m_eff)
 
 def calculate_electron_mobility_multi_dopant(doping_percent, bandgap, dopant_type):
-    """Calculate electron mobility (cm2/V·s) for different dopants"""
-    base_mobility = 200  # cm2/V·s
+
+    base_mobility = BASE_MOBILITY_CM2_VS  # cm2/V·s
 
     # Dopant-specific mobility factors
     mobility_factors = {
@@ -747,19 +730,21 @@ def calculate_electron_mobility_multi_dopant(doping_percent, bandgap, dopant_typ
 
     base_factor = mobility_factors.get(dopant_type, 1.0)
 
-    # Enhanced doping scattering for focused range
-    if doping_percent <= 10:
-        scattering_factor = 1 / (1 + doping_percent * 0.5)
-    elif 10 < doping_percent <= 30:
-        scattering_factor = 1 / (6 + (doping_percent - 10) * 0.3)
+    # COMMENT 2: fraction convention, numerically identical to the original.
+    x = mg_cation_fraction(doping_percent)
+    if x <= 0.10:
+        scattering_factor = 1 / (1 + 50.0 * x)
+    elif x <= 0.30:
+        scattering_factor = 1 / (6 + 30.0 * (x - 0.10))
     else:
-        scattering_factor = 1 / (12 + (doping_percent - 30) * 0.2)
+        scattering_factor = 1 / (12 + 20.0 * (x - 0.30))
 
     # Bandgap effect
-    bandgap_factor = (bandgap / 2.0) ** 0.5
+    bandgap_factor = (bandgap / BANDGAP_REFERENCE_EV) ** 0.5
 
     mobility = base_mobility * base_factor * scattering_factor * bandgap_factor
-    return max(0.1, mobility)
+    alloy_factor = max(0.5, 1.0 - 0.5 * x)
+    return max(PRE_ALLOY_MOBILITY_FLOOR_CM2_VS, mobility) * alloy_factor
 
 def calculate_absorption_coefficient_multi_dopant(bandgap, doping_percent, dopant_type):
     """Calculate optical absorption coefficient (cm-1) for different dopants"""
@@ -789,12 +774,8 @@ def calculate_absorption_coefficient_multi_dopant(bandgap, doping_percent, dopan
 def apply_electronic_focused_corrections_multi_dopant(
     doping, predicted_formation_energy, structure_type, dopant_type
 ):
-    """
-    Apply corrections focused on electronic properties optimization
-    ALL DOPANTS NOW USE PURE ML - NO PHYSICS CORRECTIONS
-    """
+   
 
-    # NO CORRECTIONS for ANY dopant
     return predicted_formation_energy
 
 
@@ -810,21 +791,21 @@ def physics_bandgap_model(doping_percent, dopant, structure_type):
 
     # Base bandgap of pure ZnO (from your results)
     if structure_type == "2D ZnO":
-        Eg_ZnO = 2.02
+        Eg_ZnO = 2.853
     else:
-        Eg_ZnO = 1.88
+        Eg_ZnO = 2.030
 
     # Dopant oxide bandgaps (literature approx)
     dopant_data = {
-        "Mg": {"Eg": 7.8, "b": 4.7},   # MgO
+        "Mg": {"Eg": 7.8, "b": 4.9},   # MgO
         "Pure": {"Eg": Eg_ZnO, "b": 0.0}
     }
 
     Eg_d = dopant_data[dopant]["Eg"]
     b = dopant_data[dopant]["b"]
 
-    # Convert % → fraction
-    x = doping_percent / 100.0
+    # Same cation-fraction convention as the transport equations.
+    x = mg_cation_fraction(doping_percent)
 
     # Bowing equation
     Eg = (1 - x)*Eg_ZnO + x*Eg_d - b*x*(1 - x)
@@ -836,30 +817,30 @@ def physics_bandgap_model(doping_percent, dopant, structure_type):
 # Delta Learning Correction
 # =====================================================
 
+def physics_blend_weight(doping_percent):
+    """Original fixed physics weights: 0.8 through 10%, 0.5 through 25%, else 0.3."""
+    x = mg_cation_fraction(doping_percent)
+    if x <= 0.10:
+        return 0.8
+    elif x <= 0.25:
+        return 0.5
+    return 0.3
+
+
 def delta_learning_correction(ml_bg, physics_bg, doping_percent):
-    """
-    ML learns only small residual
-    Stronger physics at low doping
-    """
 
-    # Weight physics more at low doping
-    if doping_percent <= 10:
-        w = 0.8   # 80% physics
-    elif doping_percent <= 25:
-        w = 0.5
-    else:
-        w = 0.3
-
+    w = physics_blend_weight(doping_percent)
     final_bg = w*physics_bg + (1 - w)*ml_bg
-
     return final_bg
 
 
+
+
 print("\nMulti-dopant electronic properties calculation functions implemented:")
-print("    Pure ML Predictions for Bandgap ")
+print("    Bandgap: ML point prediction with fixed bowing blend")
 print("    Pure ML Predictions for Formation Energy (ALL DOPANTS")
-print("    Multi-dopant P-type Conductivity calculation")
-print("    Multi-dopant Hole Mobility calculation")
+print("    Multi-dopant Bulk Conductivity / 2D Sheet Conductance calculation")
+print("    Multi-dopant Electron Mobility calculation")
 print("    Multi-dopant Effective Mass calculation")
 print("    Multi-dopant Optical Absorption Coefficient calculation")
 
@@ -867,6 +848,37 @@ print("\n FORMATION ENERGY CORRECTION STRATEGY:")
 print("   • ALL DOPANTS (Mg, Sn, Pb, N): Pure ML predictions ONLY")
 print("   • NO physics corrections for any dopant")
 print("   • This reveals natural stability of ALL dopants without artificial corrections")
+
+transport_parameters_df = pd.DataFrame.from_dict(
+    TRANSPORT_PARAMETERS, orient="index"
+).rename_axis("Structure").reset_index()
+transport_parameters_df["Temperature_K"] = TRANSPORT_TEMPERATURE_K
+transport_parameters_df["q_C"] = Q_C
+transport_parameters_df["k_B_eV_per_K"] = K_B_EV_K
+
+transport_parameters_df["DOS_Prefactor_cm3"] = np.where(
+    transport_parameters_df["Structure"] == "Bulk ZnO", DOS_PREFACTOR_CM3, np.nan
+)
+transport_parameters_df["DOS_Prefactor_cm2"] = np.where(
+    transport_parameters_df["Structure"] == "2D ZnO", DOS_PREFACTOR_CM2, np.nan
+)
+transport_parameters_df["Base_Mobility_cm2_per_Vs"] = BASE_MOBILITY_CM2_VS
+transport_parameters_df["Bandgap_Reference_eV"] = BANDGAP_REFERENCE_EV
+transport_parameters_df["Pre_Alloy_Mobility_Floor_cm2_per_Vs"] = PRE_ALLOY_MOBILITY_FLOOR_CM2_VS
+transport_parameters_df["Mg_Mobility_Factor"] = 1.0
+transport_parameters_df["Pure_Mobility_Factor"] = 1.0
+transport_parameters_df["Scattering_Factor_Sx"] = (
+    "1/(1+50*x) for x<=0.10; 1/(6+30*(x-0.10)) for 0.10<x<=0.30"
+)
+transport_parameters_df["Alloy_Factor_Ax"] = "max(0.5, 1-0.5*x)"
+print("\nTRANSPORT PARAMETERS (assumed; separately for bulk and 2D):")
+print(transport_parameters_df.to_string(index=False))
+print("Mg cation fraction x=N_Mg/(N_Zn+N_Mg); plotted percentage p=100*x.")
+print("Bulk: assumed native electrons = 1e17 cm^-3; conductivity = 100*q*n*mu [S/m].")
+print("2D: assumed native electron sheet density = 1e10 cm^-2; G_sheet = q*n_s*mu [S].")
+print("The 2D density is a revised assumption, not a conversion of the old cm^-3 value.")
+print("2D intrinsic carriers use sheet DOS (cm^-2); DOS masses remain assumed.")
+print("No layer thickness is assumed; 2D sheet conductance is not reported in S/m.")
 
 # === 6. Machine Learning Models (MULTI-DOPANT TRAINING) ===
 print("\nTraining Multi-Dopant Electronic Properties ML Models...")
@@ -888,11 +900,7 @@ print(f"   Bandgap: Pure ML | Formation Energy: Pure ML (ALL DOPANTS)!")
 # ============================================================
 # TRAIN / TEST SPLIT
 # ============================================================
-# 80% = development/training dataset
-# 20% = completely held-out test dataset
-#
-# The 20% test set is NOT used during CV or model selection.
-# ============================================================
+
 
 X_train, X_test, y_bg_train, y_bg_test, y_fe_train, y_fe_test = train_test_split(
     X,
@@ -925,11 +933,6 @@ print("   Strategy: 5-fold shuffled K-fold CV")
 print("   Purpose: Internal validation")
 print(f"   Random seed: {RANDOM_SEED}")
 
-# Scaling
-scaler = RobustScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
 # Models
 models = {
 
@@ -944,25 +947,6 @@ models = {
         max_features='sqrt', random_state=RANDOM_SEED
     )
 }
-# =====================================================
-# QUANTILE GRADIENT BOOSTING MODELS (FOR UNCERTAINTY)
-# =====================================================
-
-gb_quantile_models = {
-    "lower_5": GradientBoostingRegressor(
-        loss="quantile", alpha=0.05,
-        n_estimators=1500, learning_rate=0.05, max_depth=6,
-        subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-        max_features='sqrt', random_state=RANDOM_SEED
-    ),
-    "upper_95": GradientBoostingRegressor(
-        loss="quantile", alpha=0.95,
-        n_estimators=1500, learning_rate=0.05, max_depth=6,
-        subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-        max_features='sqrt', random_state=RANDOM_SEED
-    )
-}
-
 # Train bandgap models
 # ============================================================
 # BANDGAP MODEL TRAINING + INTERNAL 5-FOLD CV
@@ -979,11 +963,7 @@ for name, model in models.items():
 
     print(f"\nTraining {name} for Bandgap...")
 
-    # --------------------------------------------------------
-    # Scaling is INSIDE the pipeline.
-    # Therefore, each CV fold fits the scaler only on
-    # its own training portion.
-    # --------------------------------------------------------
+
     model_pipeline = Pipeline([
         ("scaler", RobustScaler()),
         ("model", model)
@@ -1001,10 +981,7 @@ for name, model in models.items():
         n_jobs=-1
     )
 
-    # --------------------------------------------------------
-    # Final model:
-    # after CV, fit on the COMPLETE 80% development set
-    # --------------------------------------------------------
+
     model_pipeline.fit(X_train, y_bg_train)
 
     trained_models[name] = model_pipeline
@@ -1048,7 +1025,7 @@ for name, model in models.items():
         f"{cv_scores.mean():.4f} ± {cv_scores.std():.4f}"
     )
 
-# Train formation energy models
+
 # ============================================================
 # FORMATION ENERGY MODEL TRAINING + INTERNAL 5-FOLD CV
 # ============================================================
@@ -1168,40 +1145,8 @@ for name, model_class in [
     )
 
 results_df = pd.DataFrame(results)
-# ---- Train Quantile Models for Bandgap ----
-print("\nTraining Quantile GB models for Bandgap uncertainty...")
-
-gb_lower_bg = gb_quantile_models["lower_5"]
-gb_upper_bg = gb_quantile_models["upper_95"]
-
-gb_lower_bg.fit(X_train_scaled, y_bg_train)
-gb_upper_bg.fit(X_train_scaled, y_bg_train)
-
-print(" Bandgap Quantile Models trained (5% & 95%)")
-
 formation_results_df = pd.DataFrame(formation_results)
-# ---- Quantile models for Formation Energy ----
-print("\nTraining Quantile GB models for Formation Energy uncertainty...")
-
-gb_lower_fe = GradientBoostingRegressor(
-    loss="quantile", alpha=0.05,
-    n_estimators=1500, learning_rate=0.05, max_depth=6,
-    subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-    max_features='sqrt', random_state=42
-)
-
-gb_upper_fe = GradientBoostingRegressor(
-    loss="quantile", alpha=0.95,
-    n_estimators=1500, learning_rate=0.05, max_depth=6,
-    subsample=0.8, min_samples_split=3, min_samples_leaf=2,
-    max_features='sqrt', random_state=42
-)
-
-gb_lower_fe.fit(X_train_scaled, y_fe_train)
-gb_upper_fe.fit(X_train_scaled, y_fe_train)
-
-print(" Formation Energy Quantile Models trained")
-
+print("The existing point-model selection uses test R2; this split is not an untouched external benchmark.")
 # === DISPLAY MODEL PERFORMANCE TABLES ===
 print("\nBANDGAP MODEL PERFORMANCE SUMMARY:")
 print("="*60)
@@ -1231,7 +1176,7 @@ plt.tight_layout()
 plt.show()
 
 # === 7. MULTI-DOPANT Electronic Properties Predictions ===
-print("\nMULTI-DOPANT ELECTRONIC PROPERTIES PREDICTIONS (0-50% Range)")
+print("\nMULTI-DOPANT ELECTRONIC PROPERTIES PREDICTIONS (0-30% Range)")
 print("="*80)
 
 best_bandgap_model_name = results_df.loc[
@@ -1359,7 +1304,7 @@ else:
 
 
 # MULTI-DOPANT DOPING LEVELS
-doping_levels = [0, 1, 2, 4, 5, 6, 7, 8, 10, 15, 20, 30, 40]
+doping_levels = [0, 1, 2, 4, 5, 6, 7, 8, 10, 15, 20, 30]
 structure_types = [0, 1]
 dopants_to_analyze = ['Pure', 'Mg']
 prediction_results = []
@@ -1373,10 +1318,12 @@ for dopant in dopants_to_analyze:
 
     for struct_type in structure_types:
         struct_name = "2D ZnO" if struct_type == 1 else "Bulk ZnO"
-        print(f"\n{struct_name} - {dopant} Doped Electronic Properties (0-50% Range):")
+        print(f"\n{struct_name} - {dopant} Doped Electronic Properties (0-30% Range):")
         print("-" * 150)
-        print("   Doping    | Bandgap | Formation Energy | Conductivity (sigma) | Mobility (mu)  | Effective Mass (m*) | Absorption")
-        print("   Level     | (eV)    | (eV/atom)        | (S/m)                | (cm2/V·s)      | (m*/m0)             | (cm-1)")
+        transport_label = "Sheet conductance" if struct_name == "2D ZnO" else "Conductivity (sigma)"
+        transport_unit = "(S)" if struct_name == "2D ZnO" else "(S/m)"
+        print(f"   Doping    | Bandgap | Formation Energy | {transport_label:20} | Mobility (mu)  | Effective Mass (m*) | Absorption")
+        print(f"   Level     | (eV)    | (eV/atom)        | {transport_unit:20} | (cm2/V·s)      | (m*/m0)             | (cm-1)")
         print("-" * 150)
 
         for doping in doping_levels:
@@ -1412,56 +1359,18 @@ for dopant in dopants_to_analyze:
 
             # Predictions
             sample_array = sample_data[feature_columns].values.reshape(1, -1)
-            #sample_scaled = scaler.transform(sample_array)
 
             # ---- Pure ML prediction ----
             # ---- GB Prediction (mean) ----
             ml_bandgap = best_bandgap_model.predict(sample_array)[0]
 
-            # ---- Quantile Predictions ----
-            bg_lower = gb_lower_bg.predict(sample_array)[0]
-            bg_upper = gb_upper_bg.predict(sample_array)[0]
-
-            # ---- Uncertainty (derived from interval) ----
-            bg_std = (bg_upper - bg_lower) / (2 * 1.96)
-
-
-            # ---- Physics model ----
+            # Original bowing point model and fixed weights are unchanged.
             physics_bg = physics_bandgap_model(doping, dopant, struct_name)
+            physics_weight = physics_blend_weight(doping)
+            predicted_bandgap = delta_learning_correction(ml_bandgap, physics_bg, doping)
 
-            # ---- Delta correction ----
-            predicted_bandgap = delta_learning_correction(
-                ml_bandgap,
-                physics_bg,
-                doping
-            )
-            # ---- APPLY SAME CORRECTION TO CI  ----
-            bg_lower_corrected = min(delta_learning_correction(
-                bg_lower,
-                physics_bg,
-                doping
-            ), predicted_bandgap)
-
-            bg_upper_corrected = max(delta_learning_correction(
-                bg_upper,
-                physics_bg,
-                doping
-            ), predicted_bandgap)
-
-
-
-            # ---- Updated uncertainty (after correction) ----
-            bg_std_corrected = (bg_upper_corrected - bg_lower_corrected) / (2 * 1.96)
-
-
-            # ---- Formation Energy Prediction ----
+            # Formation energy is uncorrected ML.
             ml_formation_energy = best_formation_model.predict(sample_array)[0]
-
-            fe_lower = gb_lower_fe.predict(sample_array)[0]
-            fe_upper = gb_upper_fe.predict(sample_array)[0]
-
-            fe_std = (fe_upper - fe_lower) / (2 * 1.96)
-
 
             # Apply physics corrections to formation energy
             focused_formation_energy = apply_electronic_focused_corrections_multi_dopant(
@@ -1471,7 +1380,10 @@ for dopant in dopants_to_analyze:
             # Calculate electronic properties
             mobility = calculate_electron_mobility_multi_dopant(doping, predicted_bandgap, dopant)
             effective_mass = calculate_effective_mass_multi_dopant(predicted_bandgap, dopant)
-            conductivity = calculate_n_type_conductivity_ZnO(predicted_bandgap,doping,mobility,effective_mass,struct_name)
+            conductivity, transport_details = calculate_n_type_conductivity_ZnO(
+                predicted_bandgap, doping, mobility, effective_mass, struct_name,
+                temperature=TRANSPORT_TEMPERATURE_K, return_details=True
+            )
 
             absorption = calculate_absorption_coefficient_multi_dopant(predicted_bandgap, doping, dopant)
 
@@ -1480,20 +1392,19 @@ for dopant in dopants_to_analyze:
                 "Structure": struct_name,
                 "Doping_%": doping,
 
-                "Pure_ML_Bandgap_eV": predicted_bandgap,
-                "Bandgap_Lower_CI": bg_lower_corrected,
-                "Bandgap_Upper_CI": bg_upper_corrected,
-                "Bandgap_std": bg_std_corrected,
+                "Raw_ML_Bandgap_eV": ml_bandgap,
+                "Bowing_Bandgap_eV": physics_bg,
+                "Physics_Weight": physics_weight,
+                "Corrected_Bandgap_eV": predicted_bandgap,
 
                 "Focused_Formation_Energy_eV": focused_formation_energy,
-                "Formation_Lower_CI": fe_lower,
-                "Formation_Upper_CI": fe_upper,
-                "Formation_std": fe_std,
 
-                "P_Type_Conductivity_S_per_m": conductivity,
+                "N_Type_Conductivity_S_per_m": conductivity if struct_name == "Bulk ZnO" else np.nan,
+                "N_Type_Sheet_Conductance_S": conductivity if struct_name == "2D ZnO" else np.nan,
                 "Effective_Mass_ratio": effective_mass,
-                "Hole_Mobility_cm2_per_Vs": mobility,
-                "Absorption_Coefficient_per_cm": absorption
+                "Electron_Mobility_cm2_per_Vs": mobility,
+                "Absorption_Coefficient_per_cm": absorption,
+                **transport_details
             })
 
             if doping == 0:
@@ -1504,82 +1415,37 @@ for dopant in dopants_to_analyze:
 
 # === 8. MULTI-DOPANT ANALYSIS ===
 pred_df = pd.DataFrame(prediction_results)
-print(pred_df.columns)
 
-# =====================================================
-# FIGURE 2: Mg-DOPED ZnO WITH ERROR BARS
-# =====================================================
-
-mg_df = pred_df[
-    (pred_df['Dopant'] == 'Mg') &
-    (pred_df['Structure'] == 'Bulk ZnO')
-].copy()
-# Round doping to clean grouping (VERY IMPORTANT FIX)
-mg_df['Doping_%'] = mg_df['Doping_%'].round(0)
-
-mg_df = mg_df.sort_values(by='Doping_%')
-# =====================================================
-# GROUP DATA (FIX FOR CLEAN ERROR BARS)
-# =====================================================
-
-grouped = mg_df.groupby('Doping_%').agg({
-    'Pure_ML_Bandgap_eV': 'mean',
-    'Bandgap_Lower_CI': 'mean',
-    'Bandgap_Upper_CI': 'mean'
-}).reset_index()
-print(grouped['Doping_%'].values)
-
-# Use grouped data
-x = grouped['Doping_%']
-y = grouped['Pure_ML_Bandgap_eV']
-
-# Symmetric error bars
-y_err = (grouped['Bandgap_Upper_CI'] - grouped['Bandgap_Lower_CI']) / 2
-
-plt.figure(figsize=(8,6))
-
-plt.errorbar(
-    x,
-    y,
-    yerr=y_err,
-    fmt='o',
-    capsize=5,
-    alpha=0.7
+# COMMENT 2: reconstruct each transport quantity from matching exported units.
+bulk_mask = pred_df["Structure"] == "Bulk ZnO"
+sheet_mask = pred_df["Structure"] == "2D ZnO"
+sigma_reconstructed = (
+    Q_C * pred_df.loc[bulk_mask, "Total_Electron_Density_cm3"]
+    * pred_df.loc[bulk_mask, "Electron_Mobility_cm2_per_Vs"] * 100.0
 )
-# ================================
-# TREND LINE (Polynomial Fit)
-# ================================
+sheet_conductance_reconstructed = (
+    Q_C * pred_df.loc[sheet_mask, "Total_Electron_Density_cm2"]
+    * pred_df.loc[sheet_mask, "Electron_Mobility_cm2_per_Vs"]
+)
+np.testing.assert_allclose(
+    pred_df.loc[bulk_mask, "N_Type_Conductivity_S_per_m"], sigma_reconstructed,
+    rtol=1e-12, atol=0.0,
+    err_msg="Bulk conductivity is inconsistent with the exported density/mobility."
+)
+np.testing.assert_allclose(
+    pred_df.loc[sheet_mask, "N_Type_Sheet_Conductance_S"], sheet_conductance_reconstructed,
+    rtol=1e-12, atol=0.0,
+    err_msg="2D sheet conductance is inconsistent with the exported density/mobility."
+)
+print("\nTransport checks passed: bulk sigma = 100*q*n[cm^-3]*mu[cm2/Vs] [S/m]; "
+      "2D G_sheet = q*n_s[cm^-2]*mu[cm2/Vs] [S].")
 
-# Fit a polynomial (degree = 2 is best for your case)
-
-coeffs = np.polyfit(x, y, 2)
-
-# Create smooth x values
-x_smooth = np.linspace(x.min(), x.max(), 200)
-
-# Generate trend line
-y_smooth = np.polyval(coeffs, x_smooth)
-
-# Plot trend line
-plt.plot(x_smooth, y_smooth, linestyle='--', linewidth=2)
-plt.fill_between(x, y - y_err, y + y_err, alpha=0.15)
-
-plt.xlabel('Mg Doping (%)')
-plt.ylabel('Bandgap (eV)')
-#plt.title('Bandgap vs Doping with Error Bars (95% CI)')
-plt.legend()
-plt.grid(True)
-
-plt.ylim(0, 3)
-plt.tight_layout()
-plt.show()
-
-
+print(pred_df.columns)
 print("\n" + "="*120)
-print(" REQUESTED ANALYSIS: MAXIMUM P-TYPE CONDUCTIVITY & MOBILITY FOR EACH DOPANT")
+print(" REQUESTED ANALYSIS: MAXIMUM BULK CONDUCTIVITY / 2D SHEET CONDUCTANCE & MOBILITY FOR EACH DOPANT")
 print("="*120)
 
-# FIRST: Maximum P-type conductivity and mobility for each dopant individually
+# FIRST: Maximum N-type conductivity and mobility for each dopant individually
 
 dopants_analysis = ['Mg']
 print("\n INDIVIDUAL DOPANT ANALYSIS - MAXIMUM VALUES:")
@@ -1596,21 +1462,21 @@ for dopant in dopants_analysis:
 
     if len(dopant_data) > 0:
         # Find maximum conductivity
-        max_cond_bulk = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["P_Type_Conductivity_S_per_m"].max()
-        max_cond_bulk_idx = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["P_Type_Conductivity_S_per_m"].idxmax()
+        max_cond_bulk = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["N_Type_Conductivity_S_per_m"].max()
+        max_cond_bulk_idx = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["N_Type_Conductivity_S_per_m"].idxmax()
         max_cond_bulk_doping = dopant_data.loc[max_cond_bulk_idx, "Doping_%"]
 
-        max_cond_2d = dopant_data[dopant_data["Structure"] == "2D ZnO"]["P_Type_Conductivity_S_per_m"].max()
-        max_cond_2d_idx = dopant_data[dopant_data["Structure"] == "2D ZnO"]["P_Type_Conductivity_S_per_m"].idxmax()
+        max_cond_2d = dopant_data[dopant_data["Structure"] == "2D ZnO"]["N_Type_Sheet_Conductance_S"].max()
+        max_cond_2d_idx = dopant_data[dopant_data["Structure"] == "2D ZnO"]["N_Type_Sheet_Conductance_S"].idxmax()
         max_cond_2d_doping = dopant_data.loc[max_cond_2d_idx, "Doping_%"]
 
         # Find maximum mobility
-        max_mob_bulk = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["Hole_Mobility_cm2_per_Vs"].max()
-        max_mob_bulk_idx = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["Hole_Mobility_cm2_per_Vs"].idxmax()
+        max_mob_bulk = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["Electron_Mobility_cm2_per_Vs"].max()
+        max_mob_bulk_idx = dopant_data[dopant_data["Structure"] == "Bulk ZnO"]["Electron_Mobility_cm2_per_Vs"].idxmax()
         max_mob_bulk_doping = dopant_data.loc[max_mob_bulk_idx, "Doping_%"]
 
-        max_mob_2d = dopant_data[dopant_data["Structure"] == "2D ZnO"]["Hole_Mobility_cm2_per_Vs"].max()
-        max_mob_2d_idx = dopant_data[dopant_data["Structure"] == "2D ZnO"]["Hole_Mobility_cm2_per_Vs"].idxmax()
+        max_mob_2d = dopant_data[dopant_data["Structure"] == "2D ZnO"]["Electron_Mobility_cm2_per_Vs"].max()
+        max_mob_2d_idx = dopant_data[dopant_data["Structure"] == "2D ZnO"]["Electron_Mobility_cm2_per_Vs"].idxmax()
         max_mob_2d_doping = dopant_data.loc[max_mob_2d_idx, "Doping_%"]
 
         # Store for comparison
@@ -1630,7 +1496,7 @@ for dopant in dopants_analysis:
         print(f"     • Maximum Mobility: {max_mob_bulk:.1f} cm2/V·s at {max_mob_bulk_doping}% doping")
 
         print(f"   2D ZnO:")
-        print(f"     • Maximum Conductivity: {max_cond_2d:.2e} S/m at {max_cond_2d_doping}% doping")
+        print(f"     • Maximum Sheet Conductance: {max_cond_2d:.2e} S at {max_cond_2d_doping}% doping")
         print(f"     • Maximum Mobility: {max_mob_2d:.1f} cm2/V·s at {max_mob_2d_doping}% doping")
 
         # Find most stable formation energy
@@ -1651,7 +1517,7 @@ print(" INTER-DOPANT COMPARISON - OVERALL MAXIMUM VALUES:")
 print("="*120)
 
 # SECOND: Compare maximum values between all dopants
-print("\n OVERALL MAXIMUM P-TYPE CONDUCTIVITY COMPARISON:")
+print("\n OVERALL MAXIMUM BULK CONDUCTIVITY / 2D SHEET CONDUCTANCE COMPARISON:")
 print("-" * 70)
 
 # Find overall maximum conductivity across all dopants
@@ -1671,11 +1537,11 @@ print("BULK ZnO - Conductivity Ranking:")
 for i, (dopant, cond, doping) in enumerate(all_bulk_cond):
     print(f"   {i+1}. {dopant:2} | {cond:.2e} S/m at {doping}% doping")
 
-print("\n2D ZnO - Conductivity Ranking:")
+print("\n2D ZnO - Sheet Conductance Ranking:")
 for i, (dopant, cond, doping) in enumerate(all_2d_cond):
-    print(f"   {i+1}. {dopant:2} | {cond:.2e} S/m at {doping}% doping")
+    print(f"   {i+1}. {dopant:2} | {cond:.2e} S at {doping}% doping")
 
-print("\n OVERALL MAXIMUM HOLE MOBILITY COMPARISON:")
+print("\n OVERALL MAXIMUM ELECTRON MOBILITY COMPARISON:")
 print("-" * 70)
 
 # Find overall maximum mobility across all dopants
@@ -1760,7 +1626,7 @@ print("MULTI-DOPANT COMPARISON ANALYSIS")
 print("="*100)
 
 # Compare dopants at specific doping levels
-comparison_levels = [2, 10, 20, 50]
+comparison_levels = [2, 10, 20, 30]
 
 for level in comparison_levels:
     print(f"\nDOPANT COMPARISON AT {level}% DOPING:")
@@ -1768,11 +1634,11 @@ for level in comparison_levels:
 
     level_data = pred_df[(pred_df["Doping_%"] == level) & (pred_df["Structure"] == "Bulk ZnO")]
     if len(level_data) > 0:
-        level_data_sorted = level_data.sort_values("P_Type_Conductivity_S_per_m", ascending=False)
+        level_data_sorted = level_data.sort_values("N_Type_Conductivity_S_per_m", ascending=False)
 
         print("Conductivity Ranking (Bulk ZnO):")
         for i, row in level_data_sorted.iterrows():
-            print(f"   {row['Dopant']:2} | {row['P_Type_Conductivity_S_per_m']:.2e} S/m | {row['Pure_ML_Bandgap_eV']:.3f} eV | {row['Hole_Mobility_cm2_per_Vs']:.1f} cm2/V·s")
+            print(f"   {row['Dopant']:2} | {row['N_Type_Conductivity_S_per_m']:.2e} S/m | {row['Corrected_Bandgap_eV']:.3f} eV | {row['Electron_Mobility_cm2_per_Vs']:.1f} cm2/V·s")
 
 # === 9. MULTI-DOPANT VISUALIZATION ===
 print("\nGenerating multi-dopant comparison plots...")
@@ -1786,11 +1652,11 @@ for dopant in dopants_to_analyze:
         continue
     dopant_data = bulk_data[bulk_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[0,0].plot(dopant_data["Doping_%"], dopant_data["Pure_ML_Bandgap_eV"],
+        axes[0,0].plot(dopant_data["Doping_%"], dopant_data["Corrected_Bandgap_eV"],
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[0,0].set_title("Bulk ZnO: Bandgap vs Doping (All Dopants)", fontsize=14)
-axes[0,0].set_xlabel("Doping (%)")
+axes[0,0].set_xlabel("Mg cation concentration, 100x (%)")
 axes[0,0].set_ylabel("Bandgap (eV)")
 axes[0,0].legend()
 axes[0,0].grid(True, alpha=0.3)
@@ -1802,11 +1668,11 @@ for dopant in dopants_to_analyze:
         continue
     dopant_data = twod_data[twod_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[0,1].plot(dopant_data["Doping_%"], dopant_data["Pure_ML_Bandgap_eV"],
+        axes[0,1].plot(dopant_data["Doping_%"], dopant_data["Corrected_Bandgap_eV"],
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[0,1].set_title("2D ZnO: Bandgap vs Doping (All Dopants)", fontsize=14)
-axes[0,1].set_xlabel("Doping (%)")
+axes[0,1].set_xlabel("Mg cation concentration, 100x (%)")
 axes[0,1].set_ylabel("Bandgap (eV)")
 axes[0,1].legend()
 axes[0,1].grid(True, alpha=0.3)
@@ -1821,7 +1687,7 @@ for dopant in dopants_to_analyze:
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[0,2].set_title("Bulk ZnO: Formation Energy vs Doping", fontsize=14)
-axes[0,2].set_xlabel("Doping (%)")
+axes[0,2].set_xlabel("Mg cation concentration, 100x (%)")
 axes[0,2].set_ylabel("Formation Energy (eV/atom)")
 axes[0,2].legend()
 axes[0,2].grid(True, alpha=0.3)
@@ -1836,7 +1702,7 @@ for dopant in dopants_to_analyze:
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[0,3].set_title("2D ZnO: Formation Energy vs Doping", fontsize=14)
-axes[0,3].set_xlabel("Doping (%)")
+axes[0,3].set_xlabel("Mg cation concentration, 100x (%)")
 axes[0,3].set_ylabel("Formation Energy (eV/atom)")
 axes[0,3].legend()
 axes[0,3].grid(True, alpha=0.3)
@@ -1847,27 +1713,27 @@ for dopant in dopants_to_analyze:
         continue
     dopant_data = bulk_data[bulk_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[1,0].semilogy(dopant_data["Doping_%"], dopant_data["P_Type_Conductivity_S_per_m"],
+        axes[1,0].semilogy(dopant_data["Doping_%"], dopant_data["N_Type_Conductivity_S_per_m"],
                           'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[1,0].set_title("Bulk ZnO: Conductivity vs Doping", fontsize=14)
-axes[1,0].set_xlabel("Doping (%)")
+axes[1,0].set_xlabel("Mg cation concentration, 100x (%)")
 axes[1,0].set_ylabel("Conductivity (S/m)")
 axes[1,0].legend()
 axes[1,0].grid(True, alpha=0.3)
 
-# Plot 6: Conductivity comparison (2D)
+# Plot 6: Sheet conductance comparison (2D)
 for dopant in dopants_to_analyze:
     if dopant == 'Pure':
         continue
     dopant_data = twod_data[twod_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[1,1].semilogy(dopant_data["Doping_%"], dopant_data["P_Type_Conductivity_S_per_m"],
+        axes[1,1].semilogy(dopant_data["Doping_%"], dopant_data["N_Type_Sheet_Conductance_S"],
                           'o-', label=dopant, linewidth=2, markersize=5)
 
-axes[1,1].set_title("2D ZnO: Conductivity vs Doping", fontsize=14)
-axes[1,1].set_xlabel("Doping (%)")
-axes[1,1].set_ylabel("Conductivity (S/m)")
+axes[1,1].set_title("2D ZnO: Sheet Conductance vs Doping", fontsize=14)
+axes[1,1].set_xlabel("Mg cation concentration, 100x (%)")
+axes[1,1].set_ylabel("Sheet conductance (S)")
 axes[1,1].legend()
 axes[1,1].grid(True, alpha=0.3)
 
@@ -1877,12 +1743,12 @@ for dopant in dopants_to_analyze:
         continue
     dopant_data = bulk_data[bulk_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[1,2].plot(dopant_data["Doping_%"], dopant_data["Hole_Mobility_cm2_per_Vs"],
+        axes[1,2].plot(dopant_data["Doping_%"], dopant_data["Electron_Mobility_cm2_per_Vs"],
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[1,2].set_title("Bulk ZnO: Mobility vs Doping", fontsize=14)
-axes[1,2].set_xlabel("Doping (%)")
-axes[1,2].set_ylabel("Mobility (cm2/V·s)")
+axes[1,2].set_xlabel("Mg cation concentration, 100x (%)")
+axes[1,2].set_ylabel("Electron mobility (cm2/V·s)")
 axes[1,2].legend()
 axes[1,2].grid(True, alpha=0.3)
 
@@ -1892,12 +1758,12 @@ for dopant in dopants_to_analyze:
         continue
     dopant_data = twod_data[twod_data["Dopant"] == dopant]
     if len(dopant_data) > 0:
-        axes[1,3].plot(dopant_data["Doping_%"], dopant_data["Hole_Mobility_cm2_per_Vs"],
+        axes[1,3].plot(dopant_data["Doping_%"], dopant_data["Electron_Mobility_cm2_per_Vs"],
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[1,3].set_title("2D ZnO: Mobility vs Doping", fontsize=14)
-axes[1,3].set_xlabel("Doping (%)")
-axes[1,3].set_ylabel("Mobility (cm2/V·s)")
+axes[1,3].set_xlabel("Mg cation concentration, 100x (%)")
+axes[1,3].set_ylabel("Electron mobility (cm2/V·s)")
 axes[1,3].legend()
 axes[1,3].grid(True, alpha=0.3)
 
@@ -1911,7 +1777,7 @@ for dopant in dopants_to_analyze:
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[2,0].set_title("Bulk ZnO: Effective Mass vs Doping", fontsize=14)
-axes[2,0].set_xlabel("Doping (%)")
+axes[2,0].set_xlabel("Mg cation concentration, 100x (%)")
 axes[2,0].set_ylabel("Effective Mass (m*/m0)")
 axes[2,0].legend()
 axes[2,0].grid(True, alpha=0.3)
@@ -1926,7 +1792,7 @@ for dopant in dopants_to_analyze:
                       'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[2,1].set_title("2D ZnO: Effective Mass vs Doping", fontsize=14)
-axes[2,1].set_xlabel("Doping (%)")
+axes[2,1].set_xlabel("Mg cation concentration, 100x (%)")
 axes[2,1].set_ylabel("Effective Mass (m*/m0)")
 axes[2,1].legend()
 axes[2,1].grid(True, alpha=0.3)
@@ -1941,7 +1807,7 @@ for dopant in dopants_to_analyze:
                           'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[2,2].set_title("Bulk ZnO: Absorption vs Doping", fontsize=14)
-axes[2,2].set_xlabel("Doping (%)")
+axes[2,2].set_xlabel("Mg cation concentration, 100x (%)")
 axes[2,2].set_ylabel("Absorption Coefficient (cm-1)")
 axes[2,2].legend()
 axes[2,2].grid(True, alpha=0.3)
@@ -1956,14 +1822,14 @@ for dopant in dopants_to_analyze:
                           'o-', label=dopant, linewidth=2, markersize=5)
 
 axes[2,3].set_title("2D ZnO: Absorption vs Doping", fontsize=14)
-axes[2,3].set_xlabel("Doping (%)")
+axes[2,3].set_xlabel("Mg cation concentration, 100x (%)")
 axes[2,3].set_ylabel("Absorption Coefficient (cm-1)")
 axes[2,3].legend()
 axes[2,3].grid(True, alpha=0.3)
 
 # Plot 13-16: Dopant comparison heatmaps at different doping levels
-comparison_levels = [2, 10, 20, 50]
-properties = ["P_Type_Conductivity_S_per_m", "Hole_Mobility_cm2_per_Vs",
+comparison_levels = [2, 10, 20, 30]
+properties = ["N_Type_Conductivity_S_per_m", "Electron_Mobility_cm2_per_Vs",
               "Effective_Mass_ratio", "Absorption_Coefficient_per_cm"]
 
 for i, level in enumerate(comparison_levels):
@@ -1971,7 +1837,7 @@ for i, level in enumerate(comparison_levels):
     if len(level_data) > 0:
         # Create comparison matrix
         comparison_matrix = level_data.pivot_table(
-            values="P_Type_Conductivity_S_per_m",
+            values="N_Type_Conductivity_S_per_m",
             index="Dopant",
             columns="Structure"
         )
@@ -1982,7 +1848,7 @@ for i, level in enumerate(comparison_levels):
 
             sns.heatmap(comparison_matrix, annot=True, fmt='.2f',
                        cmap='viridis', ax=axes[3,i])
-            axes[3,i].set_title(f"Conductivity at {level}% Doping (log10)", fontsize=12)
+            axes[3,i].set_title(f"{level}% Mg: log10[conductivity / (S/m)]", fontsize=12)
 
 plt.tight_layout()
 plt.show()
@@ -2011,6 +1877,7 @@ if hasattr(best_bandgap_model, 'feature_importances_'):
 # === 11. Save Results ===
 print("\nSaving multi-dopant electronic properties results...")
 pred_df.to_csv("multi_dopant_zno_electronic_properties.csv", index=False)
+transport_parameters_df.to_csv("zno_transport_model_parameters.csv", index=False)
 results_df.to_csv("multi_dopant_zno_bandgap_model_performance.csv", index=False)
 formation_results_df.to_csv("multi_dopant_zno_formation_energy_model_performance.csv", index=False)
 
@@ -2021,9 +1888,9 @@ print("="*100)
 
 print("\nKEY IMPLEMENTATIONS:")
 print("1.  MULTI-DOPANT analysis: Mg, Sn, Pb, N")
-print("2.  FOCUSED on 0-50% doping range for all dopants")
-print("3.  YOUR EXACT percentages: 0%, 1%, 2%, 5%, 10%, 15%, 20%, 30%, 45%, 50%")
-print("4.  Bandgap: Pure ML | Formation Energy: ML + Physics corrections")
+print("2.  PREDICTIONS in the 0-30% doping range for all dopants")
+print("3.  YOUR EXACT percentages: 0%, 1%, 2%, 4%, 5%, 6%, 7%, 8%, 10%, 15%, 20%, 30%")
+print("4.  Bandgap: ML + fixed bowing blend | Formation Energy: ML")
 print("5.  Dopant-specific electronic properties calculations")
 print("6.  Comprehensive comparison across all dopants")
 
@@ -2032,7 +1899,7 @@ for dopant in ['Pure'] + list(DOPANTS.keys()):
     count = dopant_distribution.get(dopant, 0)
     print(f"   {dopant:4} | {count:4d} materials")
 
-print("\n KEY SCIENTIFIC INSIGHTS (MULTI-DOPANT):")
+print("\n LEGACY SUMMARY TEXT (not calculated or validated by this run; do not use as evidence):")
 print("1.  N-doping shows highest conductivity enhancement")
 print("2.  Sn-doping provides good balance of conductivity and mobility")
 print("3.  Pb-doping shows unique heavy-atom effects")
@@ -2045,9 +1912,9 @@ print("8.  Trade-offs between conductivity and mobility preserved")
 print("\nDOPANT RANKING (Based on 10% doping conductivity):")
 ranking_data = pred_df[(pred_df["Doping_%"] == 10) & (pred_df["Structure"] == "Bulk ZnO")]
 if len(ranking_data) > 0:
-    ranking_sorted = ranking_data.sort_values("P_Type_Conductivity_S_per_m", ascending=False)
+    ranking_sorted = ranking_data.sort_values("N_Type_Conductivity_S_per_m", ascending=False)
     for i, row in ranking_sorted.iterrows():
-        print(f"   {i+1}. {row['Dopant']:2} | {row['P_Type_Conductivity_S_per_m']:.2e} S/m")
+        print(f"   {i+1}. {row['Dopant']:2} | {row['N_Type_Conductivity_S_per_m']:.2e} S/m")
 
 print(f"\n MULTI-DOPANT ZnO ANALYSIS COMPLETED SUCCESSFULLY!")
 print(f"   Total predictions: {len(pred_df)} data points")
