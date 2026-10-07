@@ -1,4 +1,4 @@
-# Entering the API key which Acts as a passcode will initiate the program further(For 2nd & 3rd code).    
+#Entering the API key which Acts as a passcode will initiate the program further(For 2nd & 3rd code).    
 
 First Code:
 This code evaluates and compares five different machine learning models using a ZnO materials dataset. Model performance is assessed based on the coefficient of determination (R²), root mean square error (RMSE), and mean absolute error (MAE) to identify the best-performing model.
